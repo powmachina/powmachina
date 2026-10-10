@@ -62,6 +62,10 @@ func LaneAllowedAt(recent []mh.Lane, lane mh.Lane, blockTime, parentTime time.Ti
 // `blockTime` is when the block being built would be timestamped (now, for a template);
 // `parentTime` is the timestamp of the current tip.
 func AllowedLanes(recent []mh.Lane, blockTime, parentTime time.Time) []mh.Lane {
+	// A header carries whole seconds. Asked with the clock's sub-second part, this would open a
+	// lane 900.3 s after the parent, the block built on that answer would say 900 s, and 900 is
+	// not more than the relief — every block of that job is refused, for as long as the job lives.
+	blockTime = time.Unix(blockTime.Unix(), 0)
 	out := make([]mh.Lane, 0, len(mh.Lanes))
 	for _, l := range mh.Lanes {
 		if LaneAllowedAt(recent, l, blockTime, parentTime) {

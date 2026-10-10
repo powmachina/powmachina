@@ -208,3 +208,28 @@ func TestGenesisLaneDoesNotCountToRotation(t *testing.T) {
 		t.Fatalf("a third block of the same lane: %v, expected ErrLaneNotAllowed", err)
 	}
 }
+
+// The lanes a node offers must be the lanes a block built this second is valid for. A header's time
+// is whole seconds, so a clock reading of 900.4 s after the parent makes a header 900 s after it —
+// and that is not past the relief yet.
+func TestAllowedLanesAgreeWithTheHeaderSecond(t *testing.T) {
+	parent := time.Unix(1_800_000_000, 0)
+	recent := []mh.Lane{mh.LaneG, mh.LaneG}
+	has := func(lanes []mh.Lane, l mh.Lane) bool {
+		for _, x := range lanes {
+			if x == l {
+				return true
+			}
+		}
+		return false
+	}
+	for _, ms := range []int64{899_900, 900_000, 900_400, 900_999, 901_000, 901_500} {
+		now := parent.Add(time.Duration(ms) * time.Millisecond)
+		header := time.Unix(now.Unix(), 0) // what work.Build writes into the block
+		offered := has(AllowedLanes(recent, now, parent), mh.LaneG)
+		valid := LaneAllowedAt(recent, mh.LaneG, header, parent)
+		if offered != valid {
+			t.Errorf("%d ms after the parent: lane G offered = %v, but a block built now is valid = %v", ms, offered, valid)
+		}
+	}
+}
