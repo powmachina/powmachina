@@ -42,6 +42,11 @@ type Feed interface {
 	Submit(j *work.Job, nonce uint64) (accepted, block bool, err error)
 }
 
+// HashrateReporter is a Feed that can pass on how fast a lane is hashing (a stratum connection).
+type HashrateReporter interface {
+	ReportHashrate(lane mh.Lane, hps float64)
+}
+
 // Options are the miner's settings.
 type Options struct {
 	Params  chain.NetParams
@@ -143,6 +148,37 @@ type lane struct {
 	tokensAt time.Time
 	seen     int // solutions the devices handed over since seenAt
 	seenAt   time.Time
+
+	// the speed while there is work (the main Run loop only; see measure)
+	lastHashes  uint64
+	lastAt      time.Time
+	hadWork     bool
+	workHashes  uint64
+	workSeconds float64
+	reportedAt  time.Time
+}
+
+// measure adds up the hashes a lane did while it had a job and, every 30 s of the clock, returns
+// the rate over that time. A lane the rotation rule keeps asleep for most of a minute still hashes
+// at full speed in the rest of it — averaged over the whole minute it would look several times
+// slower than the hardware is. Seconds without a job are therefore left out, and a stretch with
+// under five seconds of work says nothing and is carried over.
+func (l *lane) measure(now time.Time, hashes uint64) (float64, bool) {
+	hasWork := l.job.Load() != nil
+	if !l.lastAt.IsZero() && hasWork && l.hadWork && hashes >= l.lastHashes {
+		l.workHashes += hashes - l.lastHashes
+		l.workSeconds += now.Sub(l.lastAt).Seconds()
+	}
+	l.lastHashes, l.lastAt, l.hadWork = hashes, now, hasWork
+	if l.reportedAt.IsZero() {
+		l.reportedAt = now
+	}
+	if now.Sub(l.reportedAt) < 30*time.Second || l.workSeconds < 5 {
+		return 0, false
+	}
+	rate := float64(l.workHashes) / l.workSeconds
+	l.workHashes, l.workSeconds, l.reportedAt = 0, 0, now
+	return rate, true
 }
 
 // The pace: what a lane submits per second at most, what it aims for when it has to tighten, and below
@@ -256,6 +292,18 @@ func (m *Miner) Lanes() []mh.Lane {
 	return out
 }
 
+// laneHashes is the number of hashes a lane's devices have done: the CPU for lane C, the cards for G.
+func (m *Miner) laneHashes(id mh.Lane) uint64 {
+	if id == mh.LaneC {
+		return m.DeviceHashes[0].Load()
+	}
+	var n uint64
+	for i := 1; i < len(m.DeviceHashes); i++ {
+		n += m.DeviceHashes[i].Load()
+	}
+	return n
+}
+
 // Hashes is the number of hashes since the start (every device).
 func (m *Miner) Hashes() uint64 {
 	var n uint64
@@ -278,12 +326,16 @@ func (m *Miner) Run(feed Feed, quit <-chan struct{}) error {
 	go func() { feedErr <- feed.Run(m.Lanes(), m.setJob, quit) }()
 	tune := time.NewTicker(time.Second)
 	defer tune.Stop()
+	reporter, _ := feed.(HashrateReporter)
 	for {
 		select {
 		case now := <-tune.C:
 			for _, l := range m.lanes {
 				if n, changed := l.retune(now); changed {
 					m.opt.Log.Printf("lane %s: looking for a target %d× harder than asked, so that nothing found has to be dropped", l.id, uint64(1)<<min(n, 63))
+				}
+				if rate, ok := l.measure(now, m.laneHashes(l.id)); ok && reporter != nil {
+					go reporter.ReportHashrate(l.id, rate) // a slow connection must not hold up the loop
 				}
 			}
 		case <-quit:

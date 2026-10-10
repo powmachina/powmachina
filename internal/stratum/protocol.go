@@ -79,6 +79,14 @@ type JobParams struct {
 	Target string `json:"target"` // the share target, 32 B big-endian hex (hash ≤ target)
 }
 
+// HashrateParams is the `hashrate` request: how fast the client is hashing a lane while it has work
+// for it, in hashes per second. It is the client's own claim — good for showing a rig's owner what
+// the rig says, and for nothing a reward depends on.
+type HashrateParams struct {
+	Lane     string  `json:"lane"`
+	Hashrate float64 `json:"hashrate"`
+}
+
 // PauseParams is the `pause` notification: there is no work for the lane right now (lane rotation).
 type PauseParams struct {
 	Lane   string `json:"lane"`

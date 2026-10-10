@@ -214,6 +214,12 @@ func (c *Client) deliver(r *Response) {
 	}
 }
 
+// ReportHashrate tells the server how fast a lane is hashing. Nothing waits for the answer: a server
+// that does not know the method says so, and the miner mines on.
+func (c *Client) ReportHashrate(lane mh.Lane, hps float64) {
+	_, _ = c.send("hashrate", HashrateParams{Lane: lane.String(), Hashrate: hps})
+}
+
 // Submit implements miner.Feed.
 func (c *Client) Submit(j *work.Job, nonce uint64) (bool, bool, error) {
 	ch, err := c.send("submit", SubmitParams{JobID: j.ID, Nonce: FormatNonce(nonce)})

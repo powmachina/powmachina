@@ -178,3 +178,44 @@ func TestBlocksSurviveAFloodOfShares(t *testing.T) {
 	}
 	t.Logf("%d hashes, %d submitted, %d of them had to be and were", m.Hashes(), total, blocks)
 }
+
+// A lane that had work for 10 of 40 seconds and did 5,000 hashes in them hashes at 500 a second, not
+// at 125.
+func TestMeasureLeavesOutSecondsWithoutWork(t *testing.T) {
+	l := &lane{id: mh.LaneG}
+	job := &task{job: &work.Job{Lane: mh.LaneG}}
+	t0 := time.Unix(2_000, 0)
+	var hashes uint64
+	var got float64
+	var reported bool
+	for s := 0; s <= 40; s++ {
+		busy := s >= 5 && s <= 15 // work from second 5 to second 15
+		if busy {
+			l.job.Store(job)
+		} else {
+			l.job.Store(nil)
+		}
+		if s > 5 && s <= 15 {
+			hashes += 500
+		}
+		if rate, ok := l.measure(t0.Add(time.Duration(s)*time.Second), hashes); ok {
+			got, reported = rate, true
+		}
+	}
+	if !reported {
+		t.Fatal("nothing was reported in 40 seconds")
+	}
+	if got != 500 {
+		t.Fatalf("the rate is %.1f H/s, want 500", got)
+	}
+
+	// Under five seconds of work in a stretch says nothing — it is carried over, not reported.
+	l = &lane{id: mh.LaneG}
+	l.job.Store(job)
+	l.measure(t0, 0)
+	l.measure(t0.Add(2*time.Second), 1000)
+	l.job.Store(nil)
+	if _, ok := l.measure(t0.Add(40*time.Second), 1000); ok {
+		t.Fatal("two seconds of work were reported as a rate")
+	}
+}

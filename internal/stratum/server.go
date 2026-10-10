@@ -302,6 +302,11 @@ func (c *sconn) serve() {
 			}
 		case "keepalived":
 			c.reply(*req.ID, map[string]string{"status": "KEEPALIVED"}, nil)
+		case "hashrate":
+			// What the miner says about itself. The node has its own estimate from the shares
+			// (getstratuminfo) and keeps to it; the claim is acknowledged so the miner is not told
+			// the method is unknown.
+			c.reply(*req.ID, map[string]string{"status": "OK"}, nil)
 		default:
 			c.reply(*req.ID, nil, &Error{ErrCodeInvalid, "unknown method " + req.Method})
 		}
