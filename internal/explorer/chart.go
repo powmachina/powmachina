@@ -138,7 +138,7 @@ const (
 	// steady hashrate stays visible — not so it looks as if it had fallen to zero.
 	bandMin = 0.08
 	bandMax = 0.42
-	// The smallest range of a band's scale, in decades: 0.3 is a factor of two. Without it, noise of a
+	// The smallest range of the bands' scale, in decades: 0.3 is a factor of two. Without it, noise of a
 	// few percent would stretch over the whole thickness and the chart would report drops that are not there.
 	bandMinSpan = 0.3
 	bandGap     = 9.0
@@ -195,38 +195,46 @@ func BuildChart(s HashrateSeries, rng ChartRange) Chart {
 	}
 	plotH := chartH - chartPadT - chartPadB
 
-	// Every lane has its own scale: lane C is in kH/s, lane G in MH/s, on a shared one C would be left as
-	// a thread. The thickness is logarithmic and at least one decade, so variation of a few percent does
-	// not look like a crash. The bands therefore **do not compare** the two lanes — the legend says so too.
+	// Every lane starts from its own lowest value: lane C is in kH/s, lane G in MH/s, on a shared axis C
+	// would be left as a thread. The step is shared, though — one decade is as many pixels in either
+	// band — so a lane that grew a hundredfold swells far more than one that doubled. Had each band
+	// been stretched over its own range, the two would come out as mirror images whatever the lanes did.
+	// The bands therefore **do not compare** the two lanes' sizes, only how much each one moved.
 	type band struct {
-		name  string
-		thick []float64
-		last  float64
+		name   string
+		xy     [][2]float64
+		lo, hi float64
+		thick  []float64
+		last   float64
 	}
 	var bands []band
+	// The step is the widest lane's range, and at least a factor of two.
+	decades := bandMinSpan
 	for _, name := range []string{"G", "C"} { // G on top, C below — as in the design
 		pts := lanes[name]
 		if len(pts) == 0 {
 			continue
 		}
-		lo, hi := math.Inf(1), math.Inf(-1)
-		xy := make([][2]float64, len(pts))
+		b := band{name: name, lo: math.Inf(1), hi: math.Inf(-1), xy: make([][2]float64, len(pts)),
+			last: pts[len(pts)-1].hs}
 		for i, p := range pts {
-			lo = math.Min(lo, math.Log10(p.hs))
-			hi = math.Max(hi, math.Log10(p.hs))
-			xy[i] = [2]float64{float64(p.t), p.hs}
+			b.lo = math.Min(b.lo, math.Log10(p.hs))
+			b.hi = math.Max(b.hi, math.Log10(p.hs))
+			b.xy[i] = [2]float64{float64(p.t), p.hs}
 		}
-		// A band's scale is that lane's own range, stretched to at most a factor of two.
-		if d := bandMinSpan - (hi - lo); d > 0 {
-			lo, hi = lo-d/2, hi+d/2
-		}
-		th := make([]float64, bandSamples)
+		decades = math.Max(decades, b.hi-b.lo)
+		bands = append(bands, b)
+	}
+	for bi := range bands {
+		b := &bands[bi]
+		// A lane that moved less than the widest one sits in the middle of the step, not at its bottom.
+		lo := b.lo - (decades-(b.hi-b.lo))/2
+		b.thick = make([]float64, bandSamples)
 		for i := range bandSamples {
 			t := minT + (maxT-minT)*int64(i)/int64(bandSamples-1)
-			f := (math.Log10(sampleAt(xy, t)) - lo) / (hi - lo)
-			th[i] = plotH * (bandMin + math.Min(math.Max(f, 0), 1)*(bandMax-bandMin))
+			f := (math.Log10(sampleAt(b.xy, t)) - lo) / decades
+			b.thick[i] = plotH * (bandMin + math.Min(math.Max(f, 0), 1)*(bandMax-bandMin))
 		}
-		bands = append(bands, band{name: name, thick: th, last: pts[len(pts)-1].hs})
 	}
 
 	// The baseline floats: the whole column is centred, so growth of either lane spreads the band to both

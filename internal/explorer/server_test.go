@@ -480,7 +480,7 @@ func TestHomeHashrateChart(t *testing.T) {
 	body := get(t, srv, "/explorer/").Body.String()
 	for _, want := range []string{"Network hashrate", "<svg", "class=\"band lane-C\"",
 		"class=\"band lane-G\"", "MachinaHash-C", "<b>14.0 kH/s</b>", "<b>1.0 GH/s</b>",
-		">MachinaHash-C <", ">MachinaHash-G <", "own scale", "2 hours"} {
+		">MachinaHash-C <", ">MachinaHash-G <", "the same step for both", "2 hours"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("the chart is missing %q", want)
 		}

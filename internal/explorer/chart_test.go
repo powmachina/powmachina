@@ -16,7 +16,7 @@ func series(lane string, base int64, step int64, vals ...string) HashrateLane {
 }
 
 // The chart: two lanes with hashrates three orders of magnitude apart both have to fit into the image
-// (each band has its own scale) and the last value goes both next to the band and into the legend.
+// (each band starts from its own lowest value) and the last value goes both next to the band and into the legend.
 func TestBuildChart(t *testing.T) {
 	c := BuildChart(HashrateSeries{WindowBlocks: 12, Lanes: []HashrateLane{
 		series("C", 1_800_000_000, 600, "12000", "15000", "14000"),
@@ -57,6 +57,34 @@ func TestBuildChart(t *testing.T) {
 	}
 	if !strings.Contains(c.Span, "20 min") {
 		t.Fatalf("span %q", c.Span)
+	}
+}
+
+// A lane that grew a hundredfold has to swell more than one that grew by a half — the bands share the
+// step of the scale, otherwise both would fill their whole thickness and look alike.
+func TestChartBandsShareTheStep(t *testing.T) {
+	c := BuildChart(HashrateSeries{WindowBlocks: 12, Lanes: []HashrateLane{
+		series("C", 1_800_000_000, 600, "4000", "5000", "6000"),
+		series("G", 1_800_000_000, 600, "4000", "40000", "400000"),
+	}}, RangeByKey("6h"))
+	swing := func(l ChartLine) float64 {
+		pts := strings.Fields(l.Band)
+		n := len(pts) / 2
+		at := func(i int) float64 {
+			var x, y float64
+			if _, err := fmt.Sscanf(pts[i], "%f,%f", &x, &y); err != nil {
+				t.Fatalf("point %q: %v", pts[i], err)
+			}
+			return y
+		}
+		// the outline runs along the top and back along the bottom
+		first := at(2*n-1) - at(0)
+		last := at(n) - at(n-1)
+		return last - first
+	}
+	g, cpu := swing(c.Lines[0]), swing(c.Lines[1])
+	if g < 5*cpu || cpu <= 0 {
+		t.Fatalf("lane G grew 100x and its band by %.1f, lane C grew 1.5x and its band by %.1f", g, cpu)
 	}
 }
 

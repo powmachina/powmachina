@@ -5,7 +5,7 @@
 <figure class="chart">
   <figcaption>
     <h2>Network hashrate</h2>
-    <span class="dim">{{$c.Span}} · {{$c.WindowBlocks}}-block window · each algorithm on its own scale</span>
+    <span class="dim">{{$c.Span}} · {{$c.WindowBlocks}}-block window · log scale, the same step for both</span>
     <nav class="ranges" aria-label="Chart range">
       {{range $c.Ranges}}<a href="{{.Href}}"{{if .Active}} class="on" aria-current="true"{{end}}>{{.Label}}</a>{{end}}
     </nav>
