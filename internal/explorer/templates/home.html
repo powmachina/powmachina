@@ -1,0 +1,107 @@
+{{define "home.html"}}{{template "top" .}}
+{{$d := .Data}}
+{{$c := $d.Chart}}
+{{if not $c.Empty}}
+<figure class="chart">
+  <figcaption>
+    <h2>Network hashrate</h2>
+    <span class="dim">{{$c.Span}} · {{$c.WindowBlocks}}-block window · each algorithm on its own scale</span>
+    <nav class="ranges" aria-label="Chart range">
+      {{range $c.Ranges}}<a href="{{.Href}}"{{if .Active}} class="on" aria-current="true"{{end}}>{{.Label}}</a>{{end}}
+    </nav>
+  </figcaption>
+  <svg viewBox="0 0 {{$c.W}} {{$c.H}}" role="img" aria-label="Hashrate of both algorithms over time">
+    <defs>
+      <pattern id="cpu-hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+        <line class="hatch" x1="0" y1="0" x2="0" y2="6"/>
+      </pattern>
+    </defs>
+    {{range $c.XTicks}}
+      <line class="vgrid" x1="{{.Pos}}" y1="{{$c.PadT}}" x2="{{.Pos}}" y2="{{subf $c.H $c.PadB}}"/>
+      <text class="tick" x="{{.Pos}}" y="{{subf $c.H 6.0}}" text-anchor="{{.Anchor}}">{{.Label}}</text>
+    {{end}}
+    <line class="axis" x1="{{$c.PadL}}" y1="{{subf $c.H $c.PadB}}" x2="{{subf $c.W $c.PadR}}" y2="{{subf $c.H $c.PadB}}"/>
+    <g class="bands">
+    {{range $c.Lines}}
+      <polygon class="band lane-{{.Lane}}" points="{{.Band}}"/>
+      <polyline class="edge lane-{{.Lane}}" points="{{.Edge}}"/>
+      <text class="bandlabel lane-{{.Lane}}" x="{{.LabelX}}" y="{{.LabelY}}" text-anchor="end">{{algo .Lane}} {{.Last}}</text>
+    {{end}}
+    </g>
+    {{/* The strips under the cursor: the time, both lanes and the block. The link leads to that block,
+         so the chart can be clicked — and reached with the tab key. No JavaScript, only :hover and :focus-within. */}}
+    {{range $c.Tips}}
+      <a class="hit" href="{{url "/block/"}}{{.Height}}" aria-label="Block {{.Height}} at {{.Time}}">
+        <rect class="hit-area" x="{{.X}}" y="{{$c.PadT}}" width="{{.W}}" height="{{subf (subf $c.H $c.PadB) $c.PadT}}"/>
+        <line class="guide" x1="{{.GuideX}}" y1="{{$c.PadT}}" x2="{{.GuideX}}" y2="{{subf $c.H $c.PadB}}"/>
+        <g class="tip">
+          <rect class="tip-box" x="{{.TipX}}" y="{{addf $c.PadT 10.0}}" width="228" height="86" rx="2"/>
+          <text class="tip-t" x="{{addf .TipX 12.0}}" y="{{addf $c.PadT 32.0}}">{{.Time}}</text>
+          {{if .GPU}}<text class="tip-v" x="{{addf .TipX 12.0}}" y="{{addf $c.PadT 54.0}}">MachinaHash-G {{.GPU}}</text>{{end}}
+          {{if .CPU}}<text class="tip-v dim" x="{{addf .TipX 12.0}}" y="{{addf $c.PadT 72.0}}">MachinaHash-C {{.CPU}}</text>{{end}}
+          <text class="tip-b" x="{{addf .TipX 216.0}}" y="{{addf $c.PadT 90.0}}" text-anchor="end">block {{.Height}} →</text>
+        </g>
+      </a>
+    {{end}}
+  </svg>
+  <div class="chart-legend">
+    {{range $c.Lines}}<span><i class="swatch lane-{{.Lane}}"></i>{{algo .Lane}} <b>{{.Last}}</b></span>{{end}}
+    <span class="dim">two algorithms — the numbers don't compare</span>
+  </div>
+</figure>
+{{end}}
+
+{{/* The ribbon of recent blocks — the page's main element.
+     The newest block is on the left, older ones are revealed by scrolling right: with the wheel, the
+     trackpad, by dragging the scrollbar and with the keyboard (the container is focusable). No
+     JavaScript — horizontal scrolling is something the browser does itself. */}}
+<section class="ribbon" tabindex="0" aria-label="Recent blocks, newest first">
+  <ol class="ribbon-track">
+  {{range $d.Blocks}}
+    <li>
+      <a class="chip lane-{{.Lane}}" href="{{url "/block/"}}{{.Height}}">
+        <span class="chip-h">{{.Height}}</span>
+        <span class="chip-a">{{algo .Lane}}</span>
+        <span class="chip-m">{{.TxCount}} tx · {{bytes .Size}}</span>
+      </a>
+      <span class="chip-age">{{since .Time}}</span>
+    </li>
+  {{end}}
+  </ol>
+</section>
+<p class="ribbon-note">
+  <span><i class="swatch solid"></i><b>MachinaHash-G</b></span>
+  <span><i class="swatch"></i><b>MachinaHash-C</b></span>
+  {{if $d.Lanes.Run.Lane}}<span class="dim">at the tip {{$d.Lanes.Run.Length}}× {{algo $d.Lanes.Run.Lane}} of {{$d.Lanes.Run.MaxSameLaneRun}} allowed</span>{{end}}
+  {{if $d.Finality.Finalized}}<span class="dim">final up to <a href="{{url "/block/"}}{{$d.Finality.Height}}">{{$d.Finality.Height}}</a></span>{{end}}
+  <span class="dim scroll-hint">scroll sideways for older blocks →</span>
+</p>
+
+
+<h2>Latest blocks <span class="more"><a href="{{url "/blocks"}}">all blocks →</a></span></h2>
+<div class="scroll">
+<table>
+  <thead><tr>
+    <th>Height</th><th>Algorithm</th><th>Age</th><th class="num">Txs</th>
+    <th class="num">Output</th><th class="num">Size</th><th>Hash</th>
+  </tr></thead>
+  <tbody>
+  {{range $d.Blocks}}
+    <tr>
+      <td class="mono"><a href="{{url "/block/"}}{{.Height}}">{{.Height}}</a></td>
+      <td>{{template "lanetag" .Lane}}</td>
+      <td class="dim">{{since .Time}}</td>
+      {{if .Pending}}
+      <td class="num dim" colspan="3" title="the node has the header, the body has not arrived yet">body pending</td>
+      {{else}}
+      <td class="num">{{.TxCount}}</td>
+      <td class="num">{{cogsShort .ValueOutCogs}}</td>
+      <td class="num dim">{{bytes .Size}}</td>
+      {{end}}
+      <td class="mono dim"><a href="{{url "/block/"}}{{.ID}}">{{short .ID}}</a></td>
+    </tr>
+  {{end}}
+  </tbody>
+</table>
+</div>
+{{template "bottom" .}}{{end}}

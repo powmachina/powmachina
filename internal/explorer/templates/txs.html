@@ -1,0 +1,28 @@
+{{define "txs.html"}}{{template "top" .}}
+{{$d := .Data}}
+<div class="scroll">
+<table>
+  <thead><tr><th>Txid</th><th>Block</th><th>Age</th><th>Type</th><th class="num">Outputs</th><th class="num">Value</th><th class="num">Fee</th></tr></thead>
+  <tbody>
+  {{range $d.Txs}}
+    <tr>
+      <td class="mono"><a href="{{url "/tx/"}}{{.TxID}}">{{short .TxID}}</a></td>
+      <td class="mono"><a href="{{url "/block/"}}{{.Height}}">{{.Height}}</a></td>
+      <td class="dim">{{since .Time}}</td>
+      <td>{{if .Coinbase}}coinbase{{else}}transfer{{end}}</td>
+      <td class="num">{{len .VOut}}</td>
+      <td class="num">{{cogsShort .ValueOutCogs}}</td>
+      <td class="num dim">{{if .Coinbase}}—{{else}}{{cogsShort .FeeCogs}}{{end}}</td>
+    </tr>
+  {{else}}
+    <tr><td colspan="7" class="dim">{{if $d.NoIndex}}This node doesn't index transactions, so they can't be listed.{{else}}No transactions yet.{{end}}</td></tr>
+  {{end}}
+  </tbody>
+</table>
+</div>
+{{if $d.NoIndex}}
+<p class="meta"><span>the node needs its transaction index (<span class="mono">-txindex</span>)</span></p>
+{{else}}
+<p class="meta"><span>the latest <b>{{len $d.Txs}}</b> transactions from the last <b>{{$d.Blocks}}</b> blocks</span></p>
+{{end}}
+{{template "bottom" .}}{{end}}

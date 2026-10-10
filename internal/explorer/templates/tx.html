@@ -1,0 +1,51 @@
+{{define "tx.html"}}{{template "top" .}}
+{{$t := .Data}}
+<dl class="props">
+  <dt>txid</dt><dd>{{$t.TxID}}</dd>
+  <dt>block</dt><dd><a href="{{url "/block/"}}{{$t.Block}}">{{$t.Height}}</a> <span class="dim">{{short $t.Block}}</span></dd>
+  <dt>algorithm</dt><dd>{{template "lanetag" $t.Lane}}</dd>
+  <dt>time</dt><dd>{{time $t.Time}} <span class="dim">({{since $t.Time}})</span></dd>
+  <dt>confirmations</dt><dd>{{$t.Confirmations}}</dd>
+  <dt>size</dt><dd>{{bytes $t.Size}}</dd>
+  {{if $t.Coinbase}}
+  <dt>type</dt><dd>coinbase — newly mined coins</dd>
+  {{else}}
+  <dt>input value</dt><dd>{{cogs $t.ValueInCogs}} POWM</dd>
+  <dt>fee</dt><dd>{{cogs $t.FeeCogs}} POWM</dd>
+  {{end}}
+  <dt>output value</dt><dd>{{cogs $t.ValueOutCogs}} POWM</dd>
+</dl>
+
+<h2>Inputs</h2>
+<div class="scroll">
+<table>
+  <thead><tr><th class="num">#</th><th>Source</th><th>Address</th><th class="num">Value</th></tr></thead>
+  <tbody>
+  {{range $i, $in := $t.VIn}}
+    <tr>
+      <td class="num dim">{{$i}}</td>
+      <td class="mono">{{if $in.Coinbase}}<span class="dim">newly mined</span>{{else}}<a href="{{url "/tx/"}}{{$in.TxID}}">{{short $in.TxID}}</a>:{{$in.Vout}}{{end}}</td>
+      <td class="mono">{{if $in.Address}}<a href="{{url "/address/"}}{{$in.Address}}">{{short $in.Address}}</a>{{else}}<span class="dim">—</span>{{end}}</td>
+      <td class="num">{{if $in.Coinbase}}—{{else if $in.ValueCogs}}{{cogsShort $in.ValueCogs}}{{else}}<span class="dim">?</span>{{end}}</td>
+    </tr>
+  {{end}}
+  </tbody>
+</table>
+</div>
+
+<h2>Outputs</h2>
+<div class="scroll">
+<table>
+  <thead><tr><th class="num">#</th><th>Address</th><th class="num">Value</th></tr></thead>
+  <tbody>
+  {{range $t.VOut}}
+    <tr>
+      <td class="num dim">{{.N}}</td>
+      <td class="mono">{{if .Address}}<a href="{{url "/address/"}}{{.Address}}">{{.Address}}</a>{{else}}<span class="dim">script v{{.ScriptVersion}} — {{short .Script}}</span>{{end}}</td>
+      <td class="num">{{cogsShort .ValueCogs}}</td>
+    </tr>
+  {{end}}
+  </tbody>
+</table>
+</div>
+{{template "bottom" .}}{{end}}

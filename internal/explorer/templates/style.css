@@ -1,0 +1,522 @@
+/* The PowMachina explorer — the same palette and the same typeface as powmachina.com.
+ *
+ * No accent colour. The only things that set what matters apart from the background here are contrast,
+ * line weight and area. Lane C and G are not told apart by colour but by a mark — a colour would have
+ * to be invented on a monochrome page and would not work with colour blindness anyway.
+ *
+ * No JavaScript. The page is finished the moment it arrives.
+ */
+
+@font-face {
+  font-family: "Plex Sans";
+  src: url("/fonts/plexsans-var.woff2") format("woff2-variations");
+  font-weight: 100 700;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Plex Mono";
+  src: url("/fonts/plexmono-400.woff2") format("woff2");
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Plex Mono";
+  src: url("/fonts/plexmono-500.woff2") format("woff2");
+  font-weight: 500;
+  font-display: swap;
+}
+
+:root {
+  --ink: #0a0a0a;
+  --ink-2: #454545;
+  --ink-3: #7a7a7a;
+  --paper: #ffffff;
+  --paper-2: #f4f4f4;
+  --rule: #d8d8d8;
+  --rule-strong: #0a0a0a;
+
+  --sans: "Plex Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --mono: "Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+
+  /* The same gutter as the site — the content has to line up under the shared header's logo. */
+  --gutter: clamp(1.25rem, 5vw, 5rem);
+
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ink: #fafafa;
+    --ink-2: #b4b4b4;
+    --ink-3: #7a7a7a;
+    --paper: #0a0a0a;
+    --paper-2: #151515;
+    --rule: #2c2c2c;
+    --rule-strong: #fafafa;
+  }
+}
+
+:root[data-theme="dark"] {
+  --ink: #fafafa;
+  --ink-2: #b4b4b4;
+  --ink-3: #7a7a7a;
+  --paper: #0a0a0a;
+  --paper-2: #151515;
+  --rule: #2c2c2c;
+  --rule-strong: #fafafa;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--sans);
+  /* rem, not px — when rem grows on a large monitor, the explorer's text has to grow too. */
+  font-size: 0.9375rem;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+}
+
+a { color: inherit; text-decoration-color: var(--rule); text-underline-offset: 2px; }
+a:hover { text-decoration-color: currentColor; }
+a:focus-visible { outline: 2px solid var(--rule-strong); outline-offset: 2px; }
+
+.wrap {
+  max-width: 78rem;
+  margin: 0 auto;
+  padding-inline: var(--gutter);
+  padding-block: 0 4rem;
+}
+
+/* ── the hero and the tabs ────────────────────────────────────
+ *
+ * The global header (the logo, the site's sections, the theme switcher) does NOT belong here — it is
+ * in /site-header.css, which is shared by the site and the explorer. Here there is only what is the
+ * explorer's: the page title and the second level of navigation. */
+
+.hero { padding-block: clamp(2rem, 6vw, 3.5rem) 1.5rem; }
+/* The tabs and the search in one row: the tabs say where in the explorer a person is, the search is a
+ * shortcut to anywhere. On a narrow display they wrap under each other. */
+.tabs-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 1rem 2rem;
+  border-bottom: 1px solid var(--rule);
+  margin-bottom: 1.75rem;
+}
+.tabs-row .site-tabs { border-bottom: 0; margin-bottom: -1px; }
+
+form.search {
+  display: flex;
+  flex: 1 1 22rem;
+  max-width: 34rem;
+  margin: 0 0 0.6rem auto;
+  border: 1px solid var(--rule-strong);
+}
+form.search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  padding: 0.55rem 0.8rem;
+  font-family: var(--mono);
+  font-size: 0.875rem;
+  background: var(--paper);
+  color: var(--ink);
+}
+form.search input:focus { outline: none; }
+form.search:focus-within { box-shadow: inset 0 0 0 1px var(--rule-strong); }
+form.search button {
+  border: 0;
+  border-left: 1px solid var(--rule-strong);
+  background: var(--ink);
+  color: var(--paper);
+  font: inherit;
+  font-size: 0.875rem;
+  padding: 0.55rem 1.1rem;
+  cursor: pointer;
+}
+form.search button:hover { background: var(--ink-2); }
+
+/* ── the status row ───────────────────────────────────────── */
+
+.chainbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 2rem;
+  font-family: var(--mono);
+  font-size: 0.8125rem;
+  color: var(--ink-2);
+  border-bottom: 1px solid var(--rule);
+  padding-bottom: 0.75rem;
+  margin-bottom: 2rem;
+}
+.chainbar b { font-weight: 500; color: var(--ink); }
+
+/* ── the sections and tables ──────────────────────────────── */
+
+h1 {
+  font-size: clamp(2rem, 5vw, 3rem);
+  font-weight: 600;
+  letter-spacing: -0.035em;
+  line-height: 1.05;
+  margin: 0;
+  text-wrap: balance;
+}
+h2 {
+  font-size: 0.8125rem;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--ink-3);
+  margin: 2.5rem 0 0.75rem;
+  padding-bottom: 0.4rem;
+  border-bottom: 1px solid var(--rule);
+}
+/* The first h2 right under the chainbar does not need large spacing. */
+.chainbar + h2 { margin-top: 0; }
+h2 .more { float: right; text-transform: none; letter-spacing: 0; }
+
+.scroll { overflow-x: auto; }
+
+table { border-collapse: collapse; width: 100%; font-size: 0.875rem; }
+th {
+  text-align: left;
+  font-weight: 500;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-3);
+  padding: 0.4rem 0.75rem 0.4rem 0;
+  border-bottom: 1px solid var(--rule);
+  white-space: nowrap;
+}
+td {
+  padding: 0.45rem 0.75rem 0.45rem 0;
+  border-bottom: 1px solid var(--rule);
+  vertical-align: baseline;
+}
+tr:last-child td { border-bottom: 0; }
+td:last-child, th:last-child { padding-right: 0; }
+.num { text-align: right; font-family: var(--mono); white-space: nowrap; }
+.mono { font-family: var(--mono); }
+.dim { color: var(--ink-3); }
+
+/* ── the property list (a block's or transaction's detail) ── */
+
+dl.props { margin: 0; display: grid; grid-template-columns: max-content 1fr; }
+dl.props dt {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-3);
+  padding: 0.45rem 1.5rem 0.45rem 0;
+  border-bottom: 1px solid var(--rule);
+  white-space: nowrap;
+}
+dl.props dd {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 0.875rem;
+  padding: 0.45rem 0;
+  border-bottom: 1px solid var(--rule);
+  overflow-wrap: anywhere;
+}
+dl.props dt:last-of-type, dl.props dd:last-of-type { border-bottom: 0; }
+
+/* ── the block ribbon ─────────────────────────────────────── */
+
+/* The chain of recent blocks, the newest on the left. It scrolls sideways — with the wheel, the
+ * trackpad, the scrollbar and the keyboard (the container has a tabindex). Without JavaScript:
+ * horizontal scrolling and snapping are something the browser does itself, and the page therefore
+ * stays finished the moment it arrives. */
+.ribbon {
+  margin: 1.5rem 0 0.6rem;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scroll-snap-type: x proximity;
+  scrollbar-width: thin;
+  padding-bottom: 0.5rem;
+}
+.ribbon:focus-visible { outline: 2px solid var(--rule-strong); outline-offset: 3px; }
+.ribbon-track {
+  display: flex;
+  align-items: flex-start;
+  gap: 0;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  width: max-content;
+}
+.ribbon-track li {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.3rem;
+  scroll-snap-align: start;
+}
+/* The connector between blocks — a chain, not a list. It lies in the gap to the left of a chip (that
+ * gap is made by the chip's `margin-left`), so nothing hangs after the last one. */
+.ribbon-track li + li::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 2.1rem;
+  width: 0.9rem;
+  border-top: 1px solid var(--rule);
+}
+.chip {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 0.15rem;
+  width: 9.5rem;
+  min-height: 4.2rem;
+  padding: 0.55rem 0.7rem;
+  margin-left: 0.9rem;
+  border: 1px solid var(--rule-strong);
+  text-decoration: none;
+  color: inherit;
+}
+.ribbon-track li:first-child .chip { margin-left: 0; }
+.chip:hover, .chip:focus-visible { background: var(--paper-2); }
+.chip.lane-tag.lane-G { background: var(--ink); color: var(--paper); }
+/* The square before the name: filled = a GPU algorithm, hollow = CPU. A shape, not a colour — on a
+ * monochrome page and with colour blindness it works the same. */
+.lane-tag i {
+  display: inline-block;
+  width: 0.5rem;
+  height: 0.5rem;
+  margin-right: 0.35rem;
+  border: 1px solid currentColor;
+  vertical-align: -1px;
+}
+.lane-tag.lane-G i { background: currentColor; }
+.chip.lane-G:hover, .chip.lane-G:focus-visible { background: var(--ink-2); }
+.chip-h { font-family: var(--mono); font-size: 0.9375rem; }
+.chip-a { font-family: var(--mono); font-size: 0.6875rem; opacity: 0.75; }
+.chip-m { font-family: var(--mono); font-size: 0.6875rem; opacity: 0.6; }
+.chip-age { font-size: 0.6875rem; color: var(--ink-3); }
+/* The ribbon: the newest block fades in gently on load. One movement, no loop — blinking "live" dots
+ * are exactly what we do not want here. */
+.ribbon-track li:first-child .chip { animation: chip-in 520ms cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+@keyframes chip-in {
+  from { opacity: 0; transform: translateX(-10px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+.ribbon-note {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 1.5rem;
+  margin: 0 0 1.75rem;
+  font-size: 0.8125rem;
+  color: var(--ink-2);
+}
+.ribbon-note .swatch {
+  display: inline-block;
+  width: 0.7rem;
+  height: 0.7rem;
+  margin-right: 0.4rem;
+  border: 1px solid var(--rule-strong);
+  vertical-align: -1px;
+}
+.ribbon-note .swatch.solid { background: var(--ink); }
+.scroll-hint { margin-left: auto; }
+@media (max-width: 40rem) { .scroll-hint { margin-left: 0; } }
+
+/* ── the hashrate chart ───────────────────────────────────── */
+
+/* The chart is the first thing a visitor sees: centred across the full width of the content. It is
+ * drawn on the server as SVG (the explorer has no JS) and takes its colours from the page's tokens,
+ * so it works in both themes. */
+.chart { margin: 0 0 2rem; }
+/* The chart's header as a section heading: the name on the left, the range switcher on the right, a rule under both. */
+.chart figcaption {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.25rem 0.75rem;
+  padding-bottom: 0.4rem;
+  margin-bottom: 0.75rem;
+  border-bottom: 1px solid var(--rule);
+}
+/* The range switcher: ordinary links (?range=…), the page is re-rendered on the server. */
+.chart .ranges { display: flex; gap: 0.25rem; margin-left: auto; }
+.chart .ranges a {
+  padding: 0.1rem 0.45rem;
+  border: 1px solid var(--rule);
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  color: var(--ink-2);
+  text-decoration: none;
+}
+.chart .ranges a:hover { border-color: var(--ink-2); color: var(--ink); }
+.chart .ranges a.on { background: var(--ink); border-color: var(--ink); color: var(--paper); }
+.chart figcaption h2 { margin: 0; padding: 0; border: 0; }
+.chart figcaption span { font-size: 0.8125rem; }
+.chart svg { display: block; width: 100%; height: auto; }
+/* The vertical guides at the time labels and the axis — subtle, so the bands stay the strongest thing. */
+.chart .vgrid { stroke: var(--rule); stroke-width: 1; stroke-dasharray: 3 4; }
+.chart .axis { stroke: var(--rule); stroke-width: 1; }
+.chart .tick { fill: var(--ink-3); font-family: var(--mono); font-size: 11px; }
+/* A band = that lane's hashrate. G is solid, C is hatched — the same distinction as on the block tags,
+ * readable in black and white and without colour. */
+/* The bands are drawn in the full text colour — black on the light theme, white on the dark one. Grey
+ * is not used in the chart: the lanes are told apart by fill (solid vs hatched), not by saturation. */
+.chart .band { stroke: none; }
+.chart .band.lane-G { fill: var(--ink); }
+.chart .band.lane-C { fill: url(#cpu-hatch); stroke: var(--ink); stroke-width: 1; }
+.chart .hatch { stroke: var(--ink); stroke-width: 1; }
+.chart .edge { fill: none; stroke: var(--ink); stroke-width: 1.4; }
+.chart .bandlabel { font-family: var(--mono); font-size: 12px; }
+.chart .bandlabel.lane-G { fill: var(--paper); }
+/* Lane C's label lies on the hatching — an outline in the paper colour makes room around it. */
+.chart .bandlabel.lane-C {
+  fill: var(--ink);
+  stroke: var(--paper);
+  stroke-width: 3;
+  paint-order: stroke fill;
+}
+/* The strips under the cursor. Without JavaScript: the hit area is transparent, the label and the guide
+ * are revealed on :hover and on :focus-within (reached with the tab key). */
+.chart .hit-area { fill: transparent; }
+.chart .guide,
+.chart .tip { opacity: 0; }
+.chart .hit:hover .guide,
+.chart .hit:hover .tip,
+.chart .hit:focus-within .guide,
+.chart .hit:focus-within .tip { opacity: 1; }
+.chart .hit:focus { outline: none; }
+.chart .guide { stroke: var(--ink); stroke-width: 1; stroke-dasharray: 2 3; }
+.chart .tip-box { fill: var(--paper); stroke: var(--ink); stroke-width: 1; }
+.chart .tip-t { fill: var(--ink-3); font-family: var(--mono); font-size: 12px; }
+.chart .tip-v { fill: var(--ink); font-family: var(--mono); font-size: 14px; }
+.chart .tip-v.dim { fill: var(--ink-2); }
+.chart .tip-b { fill: var(--ink-3); font-family: var(--mono); font-size: 11px; }
+
+/* The chart reveals itself once on load, from left to right — it is the page's main element. Nothing
+ * pretends to be alive while doing it: it is one entrance, not a loop. */
+.chart .bands { animation: chart-reveal 900ms ease-out both; }
+@keyframes chart-reveal {
+  from { clip-path: inset(0 100% 0 0); }
+  to { clip-path: inset(0 0 0 0); }
+}
+
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.35rem 1.25rem;
+  font-size: 0.8125rem;
+  color: var(--ink-2);
+  margin-top: 0.5rem;
+}
+.chart-legend .swatch {
+  display: inline-block;
+  width: 1.1rem;
+  height: 0;
+  margin-right: 0.4rem;
+  vertical-align: middle;
+  border-top: 2px solid var(--ink);
+}
+.chart-legend .swatch.lane-C { border-top-style: dashed; }
+
+/* ── lane ─────────────────────────────────────────────────── */
+
+.lane-tag {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  font-weight: 500;
+  border: 1px solid var(--rule-strong);
+  padding: 0.05rem 0.4rem;
+  white-space: nowrap;
+}
+.lane-G { background: var(--ink); color: var(--paper); }
+
+.lanes { display: grid; gap: 1.5rem; grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr)); }
+.lane-card { border: 1px solid var(--rule); padding: 1.25rem; }
+.lane-card h3 {
+  margin: 0 0 0.25rem;
+  font-size: 1rem;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.lane-card .algo { font-size: 0.8125rem; color: var(--ink-3); margin: 0 0 1rem; }
+.lane-card dl.props { font-size: 0.8125rem; }
+/* A lane's share. The bar is text, neither an image nor JS — but it has to line up, so the window
+ * labels have a fixed width and the row is a grid rather than a flow of text. */
+.share { font-family: var(--mono); font-size: 0.8125rem; margin-top: 1rem; }
+.share-row {
+  display: grid;
+  grid-template-columns: 2.25rem max-content 4.5rem max-content;
+  justify-content: start;
+  align-items: baseline;
+  gap: 0 0.6rem;
+  line-height: 1.7;
+}
+.share-row .track { white-space: nowrap; }
+.share-row > span:nth-child(3) { text-align: right; }
+
+/* ── paging and the footer ────────────────────────────────── */
+
+.pager { display: flex; gap: 1.5rem; margin-top: 1.25rem; font-size: 0.875rem; }
+.pager .spacer { margin-left: auto; }
+
+/* .meta is a row of short facts instead of a paragraph. The page should be scannable; what can be said
+ * in three words should not be a sentence. */
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 1.75rem;
+  margin: 1.25rem 0 0;
+  font-size: 0.875rem;
+  color: var(--ink-3);
+}
+.meta b { font-weight: 500; color: var(--ink); }
+.meta a { color: inherit; }
+.meta.lead { margin: 0 0 1.5rem; }
+
+/* .lead is a note right under the h1 — without top spacing. A class, not an inline style: an inline
+ * style would require 'unsafe-inline' in the CSP. */
+.note.lead { margin-top: 0; }
+
+.note {
+  border-left: 2px solid var(--rule-strong);
+  padding-left: 1rem;
+  margin: 2rem 0 0;
+  color: var(--ink-2);
+  font-size: 0.875rem;
+  max-width: 62ch;
+}
+
+footer.bot {
+  border-top: 1px solid var(--rule);
+  margin-top: 3rem;
+  padding-top: 1rem;
+  font-size: 0.8125rem;
+  color: var(--ink-3);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.5rem;
+}
+footer.bot a { color: inherit; }
+
+@media (max-width: 40rem) {
+  form.search { flex-basis: 100%; max-width: none; margin: 0 0 0.75rem; order: -1; }
+  dl.props { grid-template-columns: 1fr; }
+  dl.props dt { border-bottom: 0; padding-bottom: 0; }
+  dl.props dd { padding-top: 0.15rem; }
+}
+
+/* Whoever has animations turned off in their system gets the page finished without movement. */
+@media (prefers-reduced-motion: reduce) {
+  .chart .bands,
+  .ribbon-track li:first-child .chip { animation: none; }
+}

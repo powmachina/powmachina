@@ -1,0 +1,35 @@
+{{define "lanes.html"}}{{template "top" .}}
+{{$d := .Data}}
+<p class="meta lead">
+  <span>two algorithms, each with its own difficulty</span>
+  <span>at most <b>{{$d.Run.MaxSameLaneRun}}</b> blocks of one algorithm in a row</span>
+</p>
+
+<section class="lanes">
+{{range $d.Lanes}}
+  <div class="lane-card">
+    <h3>{{template "lanetag" .Lane}}</h3>
+    <dl class="props">
+      <dt>difficulty</dt><dd>{{.Bits}}</dd>
+      <dt>work per block</dt><dd>{{.WorkPerBlock}}</dd>
+      <dt>hashrate</dt><dd>{{hashrate .HashrateEst}}</dd>
+      <dt>spacing</dt><dd>{{if .AvgSpacingS}}{{.AvgSpacingS}} s <span class="dim">/ target {{.TargetSpacingS}} s</span>{{else}}—{{end}}</dd>
+      <dt>last block</dt><dd><a href="{{url "/block/"}}{{.LastBlockHeight}}">{{.LastBlockHeight}}</a> <span class="dim">{{since .LastBlockTime}}</span></dd>
+    </dl>
+    <div class="share">
+      {{$lane := .}}
+      {{range $i, $w := $d.Windows}}
+        {{$s := index $lane.Share (printf "last_%d" $w)}}
+        <div class="share-row"><span class="dim">{{$w}}</span><span class="track">{{bar $s.SharePermille 20}}</span><span>{{permille $s.SharePermille}}</span><span class="dim">{{$s.Blocks}}/{{$s.OfBlocks}}</span></div>
+      {{end}}
+    </div>
+  </div>
+{{end}}
+</section>
+
+<p class="meta">
+  <span><b>The hashrates don't add up</b> — two algorithms, two units</span>
+  <span>what compares is the <b>share of blocks</b></span>
+  {{if $d.Run.Lane}}<span>at the tip <b>{{$d.Run.Length}}× {{algo $d.Run.Lane}}</b></span>{{end}}
+</p>
+{{template "bottom" .}}{{end}}

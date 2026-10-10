@@ -1,0 +1,28 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "What the UI is allowed to do. Deliberately narrow: start TWO sidecars (the node and the wallet) and nothing else — the shell plugin can spawn processes, and without this limit so could the page.",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "dialog:default",
+    "opener:default",
+    {
+      "identifier": "shell:allow-execute",
+      "allow": [
+        {
+          "name": "binaries/powmachina-wallet-rpc",
+          "sidecar": true,
+          "args": true
+        },
+        {
+          "name": "binaries/powmachinad",
+          "sidecar": true,
+          "args": true
+        }
+      ]
+    }
+  ]
+}

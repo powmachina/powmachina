@@ -1,0 +1,35 @@
+{{define "address.html"}}{{template "top" .}}
+{{$a := .Data.Addr}}{{$d := .Data}}
+<dl class="props">
+  <dt>address</dt><dd>{{$a.Address}}</dd>
+  <dt>balance</dt><dd>{{cogs $a.BalanceCogs}} POWM</dd>
+  <dt>received</dt><dd>{{cogs $a.ReceivedCogs}} POWM</dd>
+  <dt>sent</dt><dd>{{cogs $a.SentCogs}} POWM</dd>
+  <dt>transactions</dt><dd>{{$a.TxCount}}</dd>
+</dl>
+
+<h2>Activity</h2>
+<div class="scroll">
+<table>
+  <thead><tr><th>Txid</th><th>Block</th><th>Direction</th><th class="num">Net</th><th class="num">In</th><th class="num">Out</th></tr></thead>
+  <tbody>
+  {{range $a.Txs}}
+    <tr>
+      <td class="mono"><a href="{{url "/tx/"}}{{.TxID}}">{{short .TxID}}</a></td>
+      <td class="mono"><a href="{{url "/block/"}}{{.Height}}">{{.Height}}</a></td>
+      <td>{{if eq .Direction "in"}}received{{else if eq .Direction "out"}}sent{{else}}self{{end}}</td>
+      <td class="num">{{cogsShort .NetCogs}}</td>
+      <td class="num dim">{{cogsShort .InCogs}}</td>
+      <td class="num dim">{{cogsShort .OutCogs}}</td>
+    </tr>
+  {{else}}
+    <tr><td colspan="6" class="dim">Nothing has happened on this address yet.</td></tr>
+  {{end}}
+  </tbody>
+</table>
+</div>
+{{if ge $d.Older 0}}
+<div class="pager"><span class="spacer"></span><a href="{{url "/address/"}}{{$a.Address}}?before={{$d.Older}}">older →</a></div>
+{{end}}
+<p class="meta"><span>direction comes from the transaction's <b>net</b> effect — change sent back to the same address isn't counted twice</span></p>
+{{template "bottom" .}}{{end}}

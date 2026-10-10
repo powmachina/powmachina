@@ -1,0 +1,24 @@
+/data/
+.env
+
+# Go
+/bin/
+# `go build ./cmd/libmachinahash` without -o drops the binary here under the package's name
+/libmachinahash
+*.test
+
+# build artifacts
+*.o
+*.so
+*.a
+*.ptx
+*.cubin
+
+# releases (binaries, signatures) — they do not belong in git
+/dist/
+
+# GUI: build artifacts and the sidecar (scripts/gui-sidecar.sh makes it)
+/gui/src-tauri/target/
+/gui/src-tauri/binaries/
+/gui/src-tauri/gen/
+/gui/build/

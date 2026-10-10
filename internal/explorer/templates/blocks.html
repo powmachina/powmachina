@@ -1,0 +1,34 @@
+{{define "blocks.html"}}{{template "top" .}}
+{{$d := .Data}}
+<div class="scroll">
+<table>
+  <thead><tr>
+    <th>Height</th><th>Algorithm</th><th>Time</th><th class="num">Txs</th>
+    <th class="num">Output</th><th class="num">Size</th><th>Hash</th>
+  </tr></thead>
+  <tbody>
+  {{range $d.Blocks}}
+    <tr>
+      <td class="mono"><a href="{{url "/block/"}}{{.Height}}">{{.Height}}</a></td>
+      <td>{{template "lanetag" .Lane}}</td>
+      <td class="dim">{{time .Time}}</td>
+      {{if .Pending}}
+      <td class="num dim" colspan="3" title="the node has the header, the body has not arrived yet">body pending</td>
+      {{else}}
+      <td class="num">{{.TxCount}}</td>
+      <td class="num">{{cogsShort .ValueOutCogs}}</td>
+      <td class="num dim">{{bytes .Size}}</td>
+      {{end}}
+      <td class="mono dim"><a href="{{url "/block/"}}{{.ID}}">{{short .ID}}</a></td>
+    </tr>
+  {{else}}
+    <tr><td colspan="7" class="dim">No blocks yet.</td></tr>
+  {{end}}
+  </tbody>
+</table>
+</div>
+<div class="pager">
+  {{if ge $d.Newer 0}}<a href="{{url "/blocks"}}?from={{$d.Newer}}">← newer</a>{{end}}
+  {{if ge $d.Older 0}}<span class="spacer"></span><a href="{{url "/blocks"}}?from={{$d.Older}}">older →</a>{{end}}
+</div>
+{{template "bottom" .}}{{end}}

@@ -1,0 +1,31 @@
+# PowMachina explorer.
+#
+#   docker build -f Dockerfile.explorer -t powmachina-explorer .
+#   docker run --rm -p 8080:8080 powmachina-explorer -node http://node:7697
+#
+# The explorer does not need cgo — it does not call the algorithm, it reads the state from a node over
+# RPC. Hence CGO_ENABLED=0 and a static binary in a scratch image: no shell, no package manager,
+# nothing that could be abused in a publicly exposed container.
+
+FROM golang:1.26-bookworm AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" \
+        -o /out/powmachina-explorer ./cmd/powmachina-explorer
+
+FROM scratch
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=build /out/powmachina-explorer /powmachina-explorer
+# BSD-3 asks for a copyright notice in binary distribution too — an image is one.
+COPY --from=build /src/LICENSE /src/NOTICE /usr/share/doc/powmachina/
+
+# The port is **not translated** — the same number on both sides.
+EXPOSE 8080
+USER 10001:10001
+# `-listen` belongs in the ENTRYPOINT, not in CMD: arguments to `docker run` replace CMD entirely, so
+# with `-node …` it would be lost and the explorer would listen on 127.0.0.1 inside the container —
+# unreachable from outside. This way the arguments are appended and `-listen` can still be overridden
+# (the last occurrence of a flag wins).
+ENTRYPOINT ["/powmachina-explorer", "-listen", "0.0.0.0:8080"]

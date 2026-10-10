@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en" data-scheme="auto">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PowMachina Wallet</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- The mark, once. Every screen references it, so there is one drawing to keep right. -->
+<svg class="defs" aria-hidden="true">
+  <symbol id="mark" viewBox="0 0 398 301">
+    <path d="M 201 18 L 18 18 L 57 63 L 183 63 L 196 76 L 54 219 L 53 280 L 258 77 Z"/>
+    <path d="M 152 86 L 54 86 L 54 180 L 53 181 L 54 184 L 53 185 Z"/>
+    <path d="M 342 86 L 285 86 L 85 280 L 142 280 Z"/>
+    <path d="M 379 86 L 175 281 L 237 280 L 330 190 L 331 281 L 378 282 Z"/>
+  </symbol>
+</svg>
+
+<!-- Startup: the node and the wallet are coming up. -->
+<section id="boot" class="screen gate">
+  <svg class="mark big" role="img" aria-label="PowMachina"><use href="#mark"/></svg>
+  <div class="wm">PowMachina</div><div class="wms">Wallet</div>
+  <div class="led" id="boot-led" aria-hidden="true"></div>
+  <p class="sub" id="boot-text">Starting the node…</p>
+</section>
+
+<!-- Before a wallet is open: welcome, create, back up, restore, open, unlock. -->
+<section id="gate" class="screen gate hidden">
+  <svg class="mark big" role="img" aria-label="PowMachina"><use href="#mark"/></svg>
+  <div class="wm">PowMachina</div><div class="wms">Wallet</div>
+
+  <div id="g-welcome" class="pane hidden">
+    <p class="sub">This wallet runs its own node and keeps your keys on this computer only.</p>
+    <button class="opt" data-go="g-create"><b>Create a new wallet</b><span>You get 24 recovery words to write down.</span></button>
+    <button class="opt" data-go="g-restore"><b>Restore from recovery words</b><span>You already have 24 words from before.</span></button>
+    <button class="opt" data-go="g-open"><b>Open a wallet file</b><span>A wallet file from this or another computer.</span></button>
+    <p class="fine" id="welcome-dir"></p>
+  </div>
+
+  <form id="g-create" class="pane hidden" autocomplete="off">
+    <h2>Create a new wallet</h2>
+    <label class="fld"><span>Name</span><div class="in"><input id="create-name" value="wallet" spellcheck="false" maxlength="40"></div><div class="msg">Only used as the file name on this computer.</div></label>
+    <label class="fld"><span>Password</span><div class="in"><input id="create-pass" type="password" autocomplete="new-password"></div><div class="msg">At least 8 characters. You type it every time you send.</div></label>
+    <label class="fld"><span>Password again</span><div class="in"><input id="create-pass2" type="password" autocomplete="new-password"></div><div class="msg" id="create-msg"></div></label>
+    <div class="btns"><button type="submit" class="btn p" id="create-go">Create wallet</button><button type="button" class="btn" data-go="g-welcome">Back</button></div>
+  </form>
+
+  <div id="g-seed" class="pane wide hidden">
+    <h2>Write these 24 words down.</h2>
+    <p class="sub">On paper, in this order. Not a photo, not a file. Whoever has the words has the coins — and nobody, including us, can bring them back for you.</p>
+    <ol class="words" id="seed-words"></ol>
+    <div class="btns"><button class="btn p" id="seed-next">I wrote them down</button></div>
+  </div>
+
+  <form id="g-confirm" class="pane hidden" autocomplete="off">
+    <h2>Let's check your paper.</h2>
+    <p class="sub">Type these three words from what you wrote down.</p>
+    <div id="confirm-fields"></div>
+    <div class="msg bad" id="confirm-msg"></div>
+    <div class="btns"><button type="submit" class="btn p">Check</button><button type="button" class="btn" id="confirm-back">Show the words again</button></div>
+  </form>
+
+  <form id="g-restore" class="pane wide hidden" autocomplete="off">
+    <h2>Restore from recovery words</h2>
+    <label class="fld"><span>Your 24 words</span><div class="in"><textarea id="restore-words" rows="3" spellcheck="false" autocapitalize="off"></textarea></div><div class="msg" id="restore-count">Separated by spaces. Pasting all of them at once works.</div></label>
+    <label class="fld"><span>Name</span><div class="in"><input id="restore-name" value="restored" spellcheck="false" maxlength="40"></div></label>
+    <label class="fld"><span>New password</span><div class="in"><input id="restore-pass" type="password" autocomplete="new-password"></div><div class="msg">It only protects the file on this computer, so it may differ from the old one.</div></label>
+    <label class="fld"><span>Password again</span><div class="in"><input id="restore-pass2" type="password" autocomplete="new-password"></div><div class="msg" id="restore-msg"></div></label>
+    <div class="btns"><button type="submit" class="btn p" id="restore-go">Restore wallet</button><button type="button" class="btn" data-go="g-welcome">Back</button></div>
+  </form>
+
+  <form id="g-open" class="pane hidden" autocomplete="off">
+    <h2>Open a wallet file</h2>
+    <label class="fld"><span>File</span><div class="in"><input id="open-path" spellcheck="false"><button type="button" id="open-browse">Browse…</button></div></label>
+    <label class="fld"><span>Password</span><div class="in"><input id="open-pass" type="password" autocomplete="current-password"></div><div class="msg" id="open-msg"></div></label>
+    <div class="btns"><button type="submit" class="btn p" id="open-go">Open</button><button type="button" class="btn" data-go="g-welcome">Back</button></div>
+  </form>
+
+  <form id="g-unlock" class="pane hidden" autocomplete="off">
+    <p class="sub">Welcome back · <span id="unlock-name"></span></p>
+    <label class="fld"><span>Password</span><div class="in"><input id="unlock-pass" type="password" autocomplete="current-password"></div><div class="msg" id="unlock-msg">Forgot it? You can restore the wallet from its 24 recovery words.</div></label>
+    <div class="btns col"><button type="submit" class="btn p" id="unlock-go">Unlock</button><button type="button" class="link" id="unlock-other">Use another wallet</button></div>
+  </form>
+
+  <p class="foot-note"><span id="gate-net"></span></p>
+</section>
+
+<!-- The wallet. Left: what you have, what is coming, the two actions, your address — always
+     in the same place. Right: what is happening. -->
+<section id="main" class="screen app hidden">
+  <aside>
+    <div class="brand"><svg class="mark" aria-hidden="true"><use href="#mark"/></svg>PowMachina</div>
+    <div class="tn" id="net-note"></div>
+    <div class="k">Available</div>
+    <div class="avail"><span id="avail">—</span><small>POWM</small></div>
+    <div class="asof" id="asof"></div>
+    <button class="onway hidden" id="onway" data-tab="home"><span class="k">On the way</span><b id="onway-amt"></b><small id="onway-sub"></small></button>
+    <div class="acts"><button class="btn p" data-tab="send">Send</button><button class="btn" data-tab="receive">Receive</button></div>
+    <div class="k">Your address</div>
+    <div class="myaddr" id="side-addr">—</div>
+    <div><button class="link" id="side-copy">Copy address</button></div>
+    <div class="foot"><div><span id="status">—</span><br><span class="mut num" id="status-block"></span></div><button class="link" id="lock">Lock</button></div>
+  </aside>
+
+  <div class="mainpane">
+    <nav class="tabs" id="tabs">
+      <button data-tab="home" class="on">Home</button>
+      <button data-tab="activity">Activity</button>
+      <button data-tab="send">Send</button>
+      <button data-tab="receive">Receive</button>
+      <button data-tab="settings">Settings</button>
+    </nav>
+    <div class="body" id="body">
+      <div id="banner"></div>
+
+      <div id="tab-home" class="tab">
+        <div id="home-empty" class="empty hidden">
+          <h2>Nothing here yet — that's normal.</h2>
+          <p>To get your first coins, give someone your address, or set it as the payout address in your miner. The payment shows up here by itself.</p>
+          <button class="btn p" id="empty-copy">Copy my address</button>
+        </div>
+        <div id="home-onway" class="hidden">
+          <div class="lab"><span class="k">On the way</span></div>
+          <div class="card">
+            <div class="v"><span id="ow-amt"></span> POWM</div>
+            <div class="sub" id="ow-text"></div>
+            <div class="bar" id="ow-barbox"><i id="ow-bar"></i></div>
+            <details><summary>Why the wait?</summary><p>Freshly mined coins can be spent after 100 more blocks, about 3 h 20 min. Every miner waits the same — it keeps payments safe if the chain briefly disagrees with itself.</p></details>
+          </div>
+        </div>
+        <div id="home-mining" class="hidden">
+          <div class="lab"><span class="k">Your mining · last 2 hours</span></div>
+          <div id="stream"></div>
+          <div class="legend"><span><i class="sq g"></i>GPU <b id="rate-g">—</b> POWM/h</span><span><i class="sq"></i>CPU <b id="rate-c">—</b> POWM/h</span></div>
+        </div>
+        <div id="home-latest" class="hidden">
+          <div class="lab"><span class="k">Latest</span><button class="link" data-tab="activity">See everything</button></div>
+          <div id="latest"></div>
+        </div>
+      </div>
+
+      <div id="tab-activity" class="tab hidden">
+        <div class="flt" id="flt">
+          <button data-f="all" class="on">All</button><button data-f="mined">Mining</button><button data-f="received">Received</button><button data-f="sent">Sent</button>
+        </div>
+        <div id="act-list"></div>
+        <p class="sub hidden" id="act-note"></p>
+      </div>
+
+      <div id="tab-send" class="tab hidden">
+        <div id="send-paused" class="hidden"><h2>Sending is paused.</h2><p id="send-paused-text"></p></div>
+        <div id="send-flow">
+          <div class="steps"><i id="s1" class="on">1 Fill in</i><span></span><i id="s2">2 Check</i><span></span><i id="s3">3 Done</i></div>
+          <form id="send-1" autocomplete="off">
+            <label class="fld" id="f-to"><span>Who are you paying?</span><div class="in"><input id="send-to" spellcheck="false" autocapitalize="off" maxlength="120"><button type="button" id="send-paste">Paste</button></div><div class="msg" id="m-to"></div></label>
+            <label class="fld" id="f-amt"><span>How much?</span><div class="in"><input id="send-amt" inputmode="decimal" placeholder="0.00" maxlength="24"><em>POWM</em><button type="button" id="send-all">Send everything</button></div><div class="msg" id="m-amt"></div></label>
+            <button type="submit" class="btn p full" id="send-check" disabled>Check the payment</button>
+            <p class="fine">Nothing is sent yet — the next step shows everything once more.</p>
+          </form>
+          <form id="send-2" class="hidden" autocomplete="off">
+            <h2>Is this right?</h2>
+            <div class="check">
+              <div><div class="k">To — compare the highlighted start and end</div><div class="bigaddr" id="chk-to"></div></div>
+              <div class="kv">
+                <div><span id="chk-amt-k">Amount</span><span id="chk-amt"></span></div>
+                <div><span>Network fee</span><span id="chk-fee"></span></div>
+                <div><span><b>Leaves your wallet</b></span><span><b id="chk-total"></b></span></div>
+              </div>
+            </div>
+            <p class="fine hidden" id="chk-note"></p>
+            <label class="fld" id="f-pass"><span>Your wallet password</span><div class="in"><input id="send-pass" type="password" autocomplete="current-password"></div><div class="msg" id="m-pass">A payment can't be taken back once it's sent.</div></label>
+            <div class="btns split"><button type="button" class="btn" id="send-back">Back</button><button type="submit" class="btn p" id="send-go">Send</button></div>
+          </form>
+          <div id="send-3" class="hidden">
+            <h2>Sent.</h2>
+            <p id="sent-text"></p>
+            <div class="kv"><div><span id="sent-txid-k">Transaction</span><span id="sent-txid" class="wrap"></span></div></div>
+            <div class="btns"><button class="btn p" data-tab="activity">See it in Activity</button><button class="btn" id="send-again">Send another</button></div>
+          </div>
+        </div>
+      </div>
+
+      <div id="tab-receive" class="tab hidden">
+        <div class="twocol">
+          <div>
+            <h2 id="recv-title">Your address</h2>
+            <p>Give this to whoever is paying you, or set it as the payout address in your miner.</p>
+            <div class="bigaddr boxed" id="recv-addr">—</div>
+            <div class="btns"><button class="btn p" id="recv-copy">Copy address</button></div>
+          </div>
+          <div class="qr" id="recv-qr" role="img" aria-label="QR code of the address"></div>
+        </div>
+        <div class="lab spaced"><span class="k">Your addresses</span></div>
+        <div id="addr-list"></div>
+        <form id="addr-new" autocomplete="off">
+          <label class="fld"><span>Need a separate address?</span>
+            <div class="in"><input id="addr-label" placeholder="What is it for? For example: mining rig" maxlength="60"><button type="submit">Make a new address</button></div>
+            <div class="msg" id="addr-msg">One per payer lets you tell payments apart. They all lead to this same wallet, and the old ones keep working.</div></label>
+        </form>
+      </div>
+
+      <div id="tab-settings" class="tab hidden">
+        <div id="words-panel" class="banner hidden"></div>
+        <div id="keys-panel" class="banner hidden"></div>
+        <div class="sets">
+          <div>
+            <h3>Backup</h3>
+            <div class="set"><div>Recovery words<small>The only way back if this computer dies.</small></div><button class="link" id="set-words">Show</button></div>
+            <div class="set"><div>Wallet file<small id="set-file" class="wrap"></small><button class="link small" id="set-reveal">Show in folder</button></div><button class="link" id="set-close">Close wallet</button></div>
+            <h3>Security</h3>
+            <div class="set"><div>Password<small>Protects this wallet file.</small></div><button class="link" id="set-pass">Change</button></div>
+            <form id="pass-form" class="hidden" autocomplete="off">
+              <label class="fld"><span>Current password</span><div class="in"><input id="pass-old" type="password" autocomplete="current-password"></div></label>
+              <label class="fld"><span>New password</span><div class="in"><input id="pass-new" type="password" autocomplete="new-password"></div></label>
+              <label class="fld"><span>New password again</span><div class="in"><input id="pass-new2" type="password" autocomplete="new-password"></div><div class="msg" id="pass-msg"></div></label>
+              <div class="btns"><button type="submit" class="btn p">Change password</button><button type="button" class="btn" id="pass-cancel">Cancel</button></div>
+            </form>
+            <div class="set"><div>Lock when idle<small>Asks for the password again.</small></div><span>after 10 min</span></div>
+            <h3>Looks</h3>
+            <div class="set"><div>Theme</div><button class="link" id="set-theme">System</button></div>
+          </div>
+          <div>
+            <h3>Network</h3>
+            <div class="set"><div>Network</div><span id="set-net">—</span></div>
+            <div class="set"><div>Connection<small>The wallet runs its own node.</small></div><span id="set-peers">—</span></div>
+            <div class="set"><div>Latest block<small id="set-age"></small></div><span class="num" id="set-height">—</span></div>
+            <h3>If something looks wrong</h3>
+            <div class="set"><div>Re-read the chain<small>Finds your payments again. Safe, takes a while.</small></div><button class="link" id="set-rescan">Start</button></div>
+            <p class="msg" id="set-msg"></p>
+            <div class="set"><div>Move a single key<small>Export or import one key. Rarely needed.</small></div><button class="link" id="set-keys">Open</button></div>
+            <h3>About</h3>
+            <div class="set"><div>Version</div><span class="num" id="set-version">—</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="toast" id="toast"><span id="toast-text"></span><button id="toast-show" data-tab="activity">Show</button></div>
+  </div>
+</section>
+
+<!-- The paper backup. Hidden on screen; the only thing a printer sees. -->
+<section id="paper" aria-hidden="true"></section>
+
+<script src="qr.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

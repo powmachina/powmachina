@@ -1,0 +1,24 @@
+{{define "richlist.html"}}{{template "top" .}}
+{{$d := .Data}}
+<div class="scroll">
+<table>
+  <thead><tr><th class="num">#</th><th>Address</th><th class="num">Balance</th><th class="num">Share</th></tr></thead>
+  <tbody>
+  {{range $d.Addresses}}
+    <tr>
+      <td class="num dim">{{.Rank}}</td>
+      <td class="mono"><a href="{{url "/address/"}}{{.Address}}">{{.Address}}</a></td>
+      <td class="num">{{cogsShort .BalanceCogs}}</td>
+      <td class="num dim">{{permille .SharePermille}}</td>
+    </tr>
+  {{else}}
+    <tr><td colspan="4" class="dim">The node runs without the address index.</td></tr>
+  {{end}}
+  </tbody>
+</table>
+</div>
+<p class="meta">
+  <span>circulating <b>{{cogsShort $d.SupplyCogs}} POWM</b></span>
+  <span>one address is not one person — this measures concentration, not ownership</span>
+</p>
+{{template "bottom" .}}{{end}}

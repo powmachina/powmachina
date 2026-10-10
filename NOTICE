@@ -1,0 +1,59 @@
+PowMachina
+Copyright (c) 2026, xbinor and the PowMachina developers
+
+This product includes software developed by third parties. Their copyright
+notices and license terms are reproduced below, as their licenses require.
+Full license texts ship with the sources at the paths given.
+
+--------------------------------------------------------------------------------
+RandomX — the algorithm behind MachinaHash-C
+--------------------------------------------------------------------------------
+Vendored at:  internal/randomx/csrc/randomx/   (license: .../randomx/LICENSE)
+Upstream:     https://github.com/tevador/RandomX, pinned at commit 615de64
+Modification: one parameter — the Argon2 salt (internal/randomx/mh_salt.h,
+              internal/randomx/csrc/randomx/powmachina.patch). Details and the
+              reason for the pin: internal/randomx/csrc/VENDOR-RANDOMX.md
+
+  Copyright (c) 2018-2019, tevador <tevador@gmail.com>
+  Copyright (c) 2014-2019, The Monero Project
+  All rights reserved.
+
+  Redistribution and use in source and binary forms, with or without
+  modification, are permitted provided that the following conditions are met:
+      * Redistributions of source code must retain the above copyright
+        notice, this list of conditions and the following disclaimer.
+      * Redistributions in binary form must reproduce the above copyright
+        notice, this list of conditions and the following disclaimer in the
+        documentation and/or other materials provided with the distribution.
+      * Neither the name of the copyright holder nor the
+        names of its contributors may be used to endorse or promote products
+        derived from this software without specific prior written permission.
+
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+  AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+  IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+  ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+  LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+  CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+  SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+  INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+  CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+  POSSIBILITY OF SUCH DAMAGE.
+
+PowMachina is not endorsed by, affiliated with, or approved by the RandomX
+authors or the Monero Project. MachinaHash-C is a variant: it changes the
+Argon2 salt, so its hashes differ from stock RandomX.
+
+--------------------------------------------------------------------------------
+Go modules (direct dependencies)
+--------------------------------------------------------------------------------
+The full set, including transitive modules, is pinned in go.mod and go.sum; each
+module ships its own license in the Go module cache.
+
+  github.com/btcsuite/btcd/btcec/v2   ISC          (c) 2013-2025 The btcsuite developers
+  github.com/cockroachdb/pebble/v2    BSD-3-Clause (c) 2011 The LevelDB-Go Authors
+  github.com/zeebo/blake3             CC0-1.0      public domain
+  golang.org/x/crypto                 BSD-3-Clause (c) 2009 The Go Authors
+  golang.org/x/sys                    BSD-3-Clause (c) 2009 The Go Authors
+  golang.org/x/term                   BSD-3-Clause (c) 2009 The Go Authors

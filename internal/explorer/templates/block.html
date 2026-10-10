@@ -1,0 +1,47 @@
+{{define "block.html"}}{{template "top" .}}
+{{$b := .Data.Block}}
+<dl class="props">
+  <dt>hash</dt><dd>{{$b.ID}}</dd>
+  <dt>algorithm</dt><dd>{{template "lanetag" $b.Lane}}</dd>
+  <dt>time</dt><dd>{{time $b.Time}} <span class="dim">({{since $b.Time}})</span></dd>
+  <dt>confirmations</dt><dd>{{$b.Confirmations}}{{if $b.Stale}} <span class="dim">— not on the active chain</span>{{end}}</dd>
+  <dt>transactions</dt><dd>{{len $b.Txs}}</dd>
+  <dt>size</dt><dd>{{bytes $b.Size}}</dd>
+  <dt>difficulty</dt><dd>{{$b.Bits}}</dd>
+  <dt>work</dt><dd>{{$b.Work}}</dd>
+  <dt>nonce</dt><dd>{{$b.Nonce}}</dd>
+  <dt>merkle root</dt><dd>{{$b.MerkleRoot}}</dd>
+  <dt>version</dt><dd>{{$b.Version}}</dd>
+  {{if $b.PrevBlock}}<dt>previous</dt><dd><a href="{{url "/block/"}}{{$b.PrevBlock}}">{{$b.PrevBlock}}</a></dd>{{end}}
+  {{if $b.NextBlock}}<dt>next</dt><dd><a href="{{url "/block/"}}{{$b.NextBlock}}">{{$b.NextBlock}}</a></dd>{{end}}
+</dl>
+
+<h2>Transactions</h2>
+{{if .Data.Txs}}
+<div class="scroll">
+<table>
+  <thead><tr><th>Txid</th><th>Type</th><th class="num">Inputs</th><th class="num">Outputs</th><th class="num">Value</th><th class="num">Fee</th></tr></thead>
+  <tbody>
+  {{range .Data.Txs}}
+    <tr>
+      <td class="mono"><a href="{{url "/tx/"}}{{.TxID}}">{{short .TxID}}</a></td>
+      <td>{{if .Coinbase}}coinbase{{else}}transfer{{end}}</td>
+      <td class="num">{{len .VIn}}</td>
+      <td class="num">{{len .VOut}}</td>
+      <td class="num">{{cogsShort .ValueOutCogs}}</td>
+      <td class="num dim">{{if .Coinbase}}—{{else}}{{cogsShort .FeeCogs}}{{end}}</td>
+    </tr>
+  {{end}}
+  </tbody>
+</table>
+</div>
+{{else}}
+<div class="scroll">
+<table>
+  <thead><tr><th>Txid</th></tr></thead>
+  <tbody>{{range $b.Txs}}<tr><td class="mono"><a href="{{url "/tx/"}}{{.}}">{{.}}</a></td></tr>{{end}}</tbody>
+</table>
+</div>
+<p class="meta"><span>Transaction details need the node's transaction index (<span class="mono">-txindex</span>).</span></p>
+{{end}}
+{{template "bottom" .}}{{end}}

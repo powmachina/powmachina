@@ -1,0 +1,15 @@
+--- a/src/configuration.h
++++ b/src/configuration.h
+@@ -38,7 +38,12 @@
+ #define RANDOMX_ARGON_LANES        1
+ 
+ //Argon2d salt
++// POWMACHINA PATCH (the only change against upstream, see ../../VENDOR-RANDOMX.md):
++// the salt can be overridden at build time. Without the definition the behaviour is
++// byte-identical to upstream, so its own test vectors can be run against this build.
++#ifndef RANDOMX_ARGON_SALT
+ #define RANDOMX_ARGON_SALT         "RandomX\x03"
++#endif
+ 
+ //Number of random Cache accesses per Dataset item. Minimum is 2.
+ #define RANDOMX_CACHE_ACCESSES     8

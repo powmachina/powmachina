@@ -1,0 +1,209 @@
+# A release: every binary somebody might download, built from one commit, in one place.
+#
+# Why GitHub Actions and not our own runners: three of the four artifacts cannot be built on Linux
+# runners. Tauri links the system webview so the Windows installer needs a Windows machine, and
+# `nvcc` drives MSVC there, so the GPU plugin for Windows needs one too.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build (a dry run — no release is created)"
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      release: ${{ steps.v.outputs.release }}
+    steps:
+      - id: v
+        shell: bash
+        run: |
+          set -eu
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "version=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+            echo "release=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+            echo "release=no" >> "$GITHUB_OUTPUT"
+          fi
+
+  # The GPU plugin for Linux. Compiling needs no card — only running does, and that happens on a
+  # self-hosted runner with one. The architecture list has to match cuda-windows.yml, or a release
+  # runs on a different set of cards depending on the system it was built for.
+  linux-plugin:
+    runs-on: ubuntu-latest
+    container: nvidia/cuda:13.0.1-devel-ubuntu24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build libpowm-cuda.so
+        working-directory: machinahash-cuda
+        run: |
+          set -eux
+          mkdir -p bin
+          nvcc -O3 -std=c++17 \
+            -gencode arch=compute_75,code=sm_75 -gencode arch=compute_80,code=sm_80 \
+            -gencode arch=compute_86,code=sm_86 -gencode arch=compute_89,code=sm_89 \
+            -gencode arch=compute_90,code=sm_90 -gencode arch=compute_120,code=sm_120 \
+            -gencode arch=compute_120,code=compute_120 \
+            -shared -Xcompiler -fPIC -cudart static -o bin/libpowm-cuda.so plugin/powm_cuda.cu
+          # The same check the Windows job makes: a plugin that loads but exports nothing is the
+          # failure that looks like "no card found".
+          for s in pmc_abi pmc_device_count pmc_device_info pmc_create pmc_destroy \
+                   pmc_set_epoch pmc_set_job pmc_search pmc_hash pmc_config; do
+            nm -D --defined-only bin/libpowm-cuda.so | grep -qw "$s" || { echo "$s is not exported"; exit 1; }
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: powm-cuda-linux-x64
+          path: machinahash-cuda/bin/libpowm-cuda.so
+          if-no-files-found: error
+
+  windows-plugin:
+    uses: ./.github/workflows/cuda-windows.yml
+
+  gui:
+    needs: version
+    uses: ./.github/workflows/wallet-gui.yml
+    with:
+      platforms: windows+linux
+      version: ${{ needs.version.outputs.version }}
+
+  # The Go binaries for both systems, plus the two all-in-one miner archives. It runs the repo's own
+  # `scripts/release.sh`, so what CI produces and what a release made by hand produces come out of
+  # the same code — two paths would drift and the difference would only show up in the checksums.
+  binaries:
+    runs-on: ubuntu-latest
+    needs: [version, linux-plugin, windows-plugin]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # release.sh reads the commit and its date for reproducible archives
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: powm-cuda-linux-x64
+          path: machinahash-cuda/bin
+      - uses: actions/download-artifact@v4
+        with:
+          name: powm-cuda-windows-x64
+          path: machinahash-cuda/bin
+
+      # release.sh refuses to build from a tree that is not clean, so this is checked before the
+      # build and not discovered inside it. The downloaded plugins land in machinahash-cuda/bin/,
+      # which machinahash-cuda/.gitignore already ignores, so they do not make it dirty.
+      - name: The tree has to be clean
+        run: |
+          set -eu
+          test -z "$(git status --porcelain)" || { echo "the tree is dirty:"; git status --porcelain; exit 1; }
+          test -f machinahash-cuda/bin/libpowm-cuda.so
+          test -f machinahash-cuda/bin/powm-cuda.dll
+
+      - name: Build
+        run: |
+          set -eu
+          sudo apt-get update -qq && sudo apt-get install -y -qq zip
+          scripts/release.sh "${{ needs.version.outputs.version }}" --no-sign
+          ls -R "dist/${{ needs.version.outputs.version }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binaries
+          path: dist/${{ needs.version.outputs.version }}/
+          if-no-files-found: error
+
+  publish:
+    runs-on: ubuntu-latest
+    needs: [version, binaries, gui]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      # One flat directory of assets, plus one checksum list over all of them. The list release.sh
+      # made covers the binaries only — the installers are built on other machines and arrive here,
+      # so the list is rewritten over everything that actually ships.
+      - name: Collect the assets
+        id: collect
+        shell: bash
+        run: |
+          set -eu
+          mkdir -p out
+
+          # Everything is flattened on the way in, and a name is never allowed to land twice.
+          # `gh release upload` names an asset after the file's basename, so the release is flat
+          # whatever arrives here — and a list that says `linux-amd64/powmachinad` then matches
+          # nothing anybody downloads. The verification runs with `--ignore-missing`, so it would
+          # not fail either: it would skip every binary and report success on the installers alone.
+          #
+          # The rename also takes the spaces out. Tauri names an installer after the product —
+          # "PowMachina Wallet_0.1.0_x64-setup.exe" — and a space is trouble three times over: it
+          # becomes %20 in the download URL, it splits the `sha256sum` line the verification reads
+          # back, and it needs quoting in every command anybody copies from the docs.
+          take() {
+            local dest="out/$(basename "$1" | tr ' ' '-')"
+            [ -e "$dest" ] && { echo "two assets would both land on $dest" >&2; return 1; }
+            cp "$1" "$dest"
+          }
+
+          # release.sh's own SHA256SUMS covers the binaries only and is rewritten below.
+          while IFS= read -r -d '' f; do take "$f"; done < <(
+            find artifacts/binaries -type f ! -name SHA256SUMS -print0)
+          while IFS= read -r -d '' f; do take "$f"; done < <(
+            find artifacts -path 'artifacts/wallet-*' -type f \
+              \( -name '*setup.exe' -o -name '*.deb' -o -name '*.AppImage' -o -name '*.rpm' \) -print0)
+
+          # `! -name SHA256SUMS` is not belt-and-braces: the redirection creates the file before
+          # `find` walks the directory, so without it the list contains itself, with a hash it
+          # cannot possibly have — and verifying the list then fails for everyone.
+          ( cd out && rm -f SHA256SUMS && find . -type f ! -name SHA256SUMS -printf '%P\0' \
+            | sort -z | xargs -0 sha256sum > SHA256SUMS )
+          echo "--- what ships:"
+          cat out/SHA256SUMS
+
+      - name: Draft the release
+        if: needs.version.outputs.release == 'yes'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -eu
+          V="${{ needs.version.outputs.version }}"
+          # A draft prerelease: nothing is visible until the signature is on and somebody has run it.
+          # --notes-file keeps the body out of the shell.
+          cat > notes.md <<EOF
+          PowMachina $V — testnet.
+
+          **Not signed yet.** Run \`scripts/sign-release.sh $V\` on the machine that holds the
+          minisign key, then publish this release. Until the signature is attached, do not hand
+          these files to anybody: the checksum list is only worth what its signature says.
+
+          Verifying (the public key is published at powmachina.com):
+
+          \`\`\`
+          minisign -Vm SHA256SUMS -P <public key>
+          sha256sum --ignore-missing -c SHA256SUMS
+          \`\`\`
+
+          Testnet coins have no value.
+          EOF
+          gh release create "$V" --draft --prerelease --title "PowMachina $V" --notes-file notes.md
+          find out -type f -print0 | xargs -0 gh release upload "$V" --clobber
+
+      - name: Dry run — just show what would ship
+        if: needs.version.outputs.release != 'yes'
+        run: |
+          echo "dry run: no release was created"
+          ls -la out

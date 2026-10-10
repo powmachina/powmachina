@@ -1,0 +1,192 @@
+# Desktop wallet installers.
+#
+# Why hosted runners: Tauri **cannot be cross-built** —
+# it links against the system webview (WebView2 on Windows, WKWebView on macOS). We can build Linux
+# at home (`scripts/gui-build.sh`), these two we cannot.
+#
+# The platform is chosen deliberately: macOS runners are the slowest and scarcest of the three, so
+# "build everything" has to be a decision, not a default.
+name: wallet-gui
+
+on:
+  push:
+    tags: ["wallet-v*"]
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: "Which platforms to build for"
+        type: choice
+        default: windows
+        options: [windows, windows+linux, all]
+      version:
+        description: "Version to stamp into the installers (blank keeps tauri.conf.json)"
+        type: string
+        required: false
+  # release.yml calls this for the installers. The caller says which platforms it wants rather
+  # than getting all of them.
+  workflow_call:
+    inputs:
+      platforms:
+        type: string
+        default: windows+linux
+      # The release this build belongs to. Everything in this repository ships under one number —
+      # the node, the miner and the wallet all come from the same commit — so the installers take
+      # it from the release's tag instead of from a number committed in tauri.conf.json.
+      version:
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  # The matrix is computed here, because `matrix` cannot be used in a job condition and `inputs` does
+  # not exist for a push event.
+  select:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+    steps:
+      - id: set
+        shell: bash
+        run: |
+          WIN='{"os":"windows-latest","triple":"x86_64-pc-windows-msvc","label":"windows-x64"}'
+          LIN='{"os":"ubuntu-22.04","triple":"x86_64-unknown-linux-gnu","label":"linux-x64"}'
+          MAC='{"os":"macos-latest","triple":"aarch64-apple-darwin","label":"macos-arm64"}'
+          # workflow_call and workflow_dispatch both arrive through inputs.platforms; a direct tag
+          # push has no inputs at all, and that — not github.event_name — is what separates them.
+          # A called workflow inherits the caller's event, so testing for `push` here silently
+          # overrode what release.yml asked for and built macOS on every release.
+          case "${{ inputs.platforms || 'all' }}" in
+            windows)        M="[$WIN]";;
+            "windows+linux") M="[$WIN,$LIN]";;
+            # Intel macOS is absent on purpose: the `macos-13` hosted runner was retired, so a job
+            # asking for it waits for a runner that no longer exists and never starts.
+            *)              M="[$WIN,$LIN,$MAC]";;
+          esac
+          echo "matrix=$M" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: select
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.select.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache-dependency-path: go.sum
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.triple }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: gui/src-tauri
+
+      # On Linux Tauri links webkit2gtk; on Windows and macOS the webview is in the system.
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+            librsvg2-dev patchelf
+
+      # The wallet pulls in the vendored RandomX through chain, so cgo is mandatory and the build
+      # needs a C compiler. The Windows runner usually has gcc, but we are not going to rely on it.
+      - name: C compiler (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          if ! command -v gcc >/dev/null; then
+            choco install mingw -y --no-progress
+            echo "C:\\ProgramData\\mingw64\\mingw64\\bin" >> "$GITHUB_PATH"
+          fi
+          gcc --version || true
+
+      # Two sidecars: the wallet and the node. The node is in the installer so the app does not need a
+      # foreign server — the wallet does not verify the PoW of blocks from a node, so running its own
+      # node is the only way not to rely on somebody not lying to us about received payments.
+      - name: Sidecars (node + wallet-rpc)
+        shell: bash
+        run: |
+          set -eux
+          mkdir -p gui/src-tauri/binaries
+          EXT=""
+          LD="-s -w"
+          if [[ "${{ matrix.triple }}" == *windows* ]]; then
+            EXT=".exe"
+            # -extldflags=-static is MANDATORY on Windows: without it the .exe depends on
+            # libgcc_s_seh-1.dll and libstdc++-6.dll, which a clean Windows does not have and which
+            # are not bundled into the installer. The wallet would look like it cannot start its
+            # backend.
+            LD="$LD -extldflags=-static"
+          fi
+          for cmd in powmachina-wallet-rpc powmachinad; do
+            CGO_ENABLED=1 go build -trimpath -ldflags="$LD" \
+              -o "gui/src-tauri/binaries/$cmd-${{ matrix.triple }}$EXT" "./cmd/$cmd"
+          done
+          ls -la gui/src-tauri/binaries/
+
+      # The shell reads the sidecars' HTTP replies by hand; its tests are what feeds it a long one.
+      # An installer whose wallet stops listing payments after twenty of them is not worth building.
+      - name: Shell tests
+        working-directory: gui/src-tauri
+        run: cargo test --target ${{ matrix.triple }}
+
+      # One release, one number. Without this the installer carries whatever is committed in
+      # tauri.conf.json, and a wallet could call itself one version inside a release of another. Tauri
+      # wants plain semver, so the `v` — or `wallet-v` on a GUI-only tag — comes off. Nothing to
+      # stamp (a dispatch with no version) leaves the file alone, so a local build still works.
+      #
+      # node rather than python3: it is on every runner image under the same name, which python3
+      # is not on Windows.
+      - name: Stamp the version
+        shell: bash
+        run: |
+          set -eu
+          V="${{ inputs.version || (startsWith(github.ref_name, 'wallet-v') && github.ref_name || '') }}"
+          V="${V#wallet-}"
+          V="${V#v}"
+          if [ -z "$V" ]; then
+            echo "no version given — keeping the one in tauri.conf.json"
+            exit 0
+          fi
+          node -e '
+            const fs = require("fs"), p = "gui/src-tauri/tauri.conf.json";
+            const d = JSON.parse(fs.readFileSync(p, "utf8"));
+            d.version = process.argv[1];
+            fs.writeFileSync(p, JSON.stringify(d, null, 2) + "\n");
+            console.log("version:", d.version);
+          ' "$V"
+
+      - uses: tauri-apps/tauri-action@v0
+        with:
+          projectPath: gui
+          args: --target ${{ matrix.triple }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wallet-${{ matrix.label }}
+          # The installers and the bare binary — the one without an install is handy for a quick try.
+          #
+          # Each bundle type is named explicitly rather than globbing bundle/**/*: the AppImage
+          # bundler leaves its whole build tree next to the output (the .AppDir with a copy of the
+          # runtime in it), and uploading that made the Linux artifact 241 MB against 13 MB for
+          # Windows. Every job that downloads artifacts then paid for it twice.
+          path: |
+            gui/src-tauri/target/${{ matrix.triple }}/release/bundle/deb/*.deb
+            gui/src-tauri/target/${{ matrix.triple }}/release/bundle/rpm/*.rpm
+            gui/src-tauri/target/${{ matrix.triple }}/release/bundle/appimage/*.AppImage
+            gui/src-tauri/target/${{ matrix.triple }}/release/bundle/msi/*.msi
+            gui/src-tauri/target/${{ matrix.triple }}/release/bundle/nsis/*setup.exe
+            gui/src-tauri/target/${{ matrix.triple }}/release/bundle/dmg/*.dmg
+            gui/src-tauri/target/${{ matrix.triple }}/release/powmachina-wallet-gui
+            gui/src-tauri/target/${{ matrix.triple }}/release/powmachina-wallet-gui.exe
+          if-no-files-found: error
+          retention-days: 30

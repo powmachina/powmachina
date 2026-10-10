@@ -1,0 +1,84 @@
+# The miner's GPU plugin for Windows (powm-cuda.dll).
+#
+# Why a hosted runner: on Windows `nvcc` drives MSVC — the DLL
+# cannot be cross-built. The Linux plugin is built in release.yml instead.
+#
+# This job **compiles only**. A GitHub runner has no card, so the test vectors cannot run here; the
+# kernel is verified on real hardware before a
+# release takes the DLL. What this job does prove is that the plugin still builds under MSVC and
+# still exports all ten symbols — the two things that break silently.
+name: cuda-windows
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "machinahash-cuda/**"
+      - ".github/workflows/cuda-windows.yml"
+  workflow_dispatch:
+  # release.yml calls this instead of copying the steps: the -gencode list has to stay identical
+  # between a plain build and a release, and two copies of it would drift.
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  # The same toolkit the DLL was verified with on a card. Changing it changes what comes out.
+  CUDA_VERSION: "13.4.1"
+  CUDA_SHA256: 632a5912995473cea77b24788715b8d94db17a94cfea102a12f72c3614fe8c7e
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The whole toolkit, silently. Compiling needs no card.
+      - name: CUDA toolkit
+        shell: pwsh
+        run: |
+          $exe = "$env:RUNNER_TEMP\cuda.exe"
+          $url = "https://developer.download.nvidia.com/compute/cuda/$env:CUDA_VERSION/local_installers/cuda_${env:CUDA_VERSION}_windows_x86_64.exe"
+          curl.exe -fsSL --retry 3 -o $exe $url
+          $got = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
+          if ($got -ne $env:CUDA_SHA256) { throw "the CUDA installer has hash $got, expected $env:CUDA_SHA256" }
+          $p = Start-Process $exe -ArgumentList '-s' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "the CUDA installer exited with $($p.ExitCode)" }
+          $bin = Get-ChildItem "$env:ProgramFiles\NVIDIA GPU Computing Toolkit\CUDA\v*\bin" | Select-Object -First 1
+          "$($bin.FullName)" >> $env:GITHUB_PATH
+
+      # The architecture list is the one the .so is built with and it has to stay the same:
+      # a release has to run on the same range of cards on both systems.
+      - name: Build powm-cuda.dll
+        shell: cmd
+        working-directory: machinahash-cuda
+        run: |
+          for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do call "%%i\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+          if not exist bin mkdir bin
+          nvcc --version || exit /b 1
+          nvcc -O3 -std=c++17 ^
+            -gencode arch=compute_75,code=sm_75 -gencode arch=compute_80,code=sm_80 ^
+            -gencode arch=compute_86,code=sm_86 -gencode arch=compute_89,code=sm_89 ^
+            -gencode arch=compute_90,code=sm_90 -gencode arch=compute_120,code=sm_120 ^
+            -gencode arch=compute_120,code=compute_120 ^
+            -shared -cudart static -o bin\powm-cuda.dll plugin\powm_cuda.cu || exit /b 1
+          dumpbin /nologo /exports bin\powm-cuda.dll > bin\exports.txt || exit /b 1
+          dumpbin /nologo /dependents bin\powm-cuda.dll
+
+      # Without the export macro the DLL builds, loads, and then every GetProcAddress returns null.
+      - name: All ten symbols are exported
+        shell: bash
+        working-directory: machinahash-cuda
+        run: |
+          for s in pmc_abi pmc_device_count pmc_device_info pmc_create pmc_destroy \
+                   pmc_set_epoch pmc_set_job pmc_search pmc_hash pmc_config; do
+            grep -qw "$s" bin/exports.txt || { echo "$s is not exported"; exit 1; }
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: powm-cuda-windows-x64
+          path: machinahash-cuda/bin/powm-cuda.dll
+          if-no-files-found: error
+          retention-days: 30

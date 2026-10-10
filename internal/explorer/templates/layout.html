@@ -1,0 +1,115 @@
+{{define "top"}}<!doctype html>
+<html lang="en"{{if .Theme}} data-theme="{{.Theme}}"{{end}}>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}} · PowMachina Explorer</title>
+<meta name="description" content="PowMachina block explorer — blocks, transactions, addresses and the share of both mining lanes.">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+{{/* The same preload as on the site — without it the header renders in a fallback font for a moment
+     and jumps when coming from the homepage. */}}
+<link rel="preload" href="/fonts/plexsans-var.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/fonts/plexmono-400.woff2" as="font" type="font/woff2" crossorigin>
+{{/* The site's shared header: one file for both the site and the explorer, served by the site. */}}
+<link rel="stylesheet" href="/site-header.css">
+<link rel="stylesheet" href="{{cssurl}}">
+{{/* The same script as on the site — the theme choice therefore carries across the whole domain. The
+     explorer reads it on the server too, so it works without JS as well and the page does not flash. */}}
+<script src="/theme.js"></script>
+</head>
+<body>
+{{template "siteheader" .}}
+
+<main class="wrap">
+  <div class="hero">
+    <h1>{{.Title}}</h1>
+  </div>
+  {{template "tabs" .}}
+{{if .Info}}
+  <div class="chainbar">
+    <span>network <b>{{upper .Info.Network}}</b></span>
+    <span>height <b>{{.Info.Height}}</b></span>
+    <span>UTXO <b>{{.Info.UTXOCount}}</b></span>
+    <span>mempool <b>{{.Info.MempoolTxs}}</b> tx</span>
+    <span>DAG epoch <b>{{.Info.Epoch}}</b></span>
+    <span class="algos"><b>MachinaHash-C</b> · <b>MachinaHash-G</b></span>
+    <span class="dim">last block {{since .Info.TipTime}}</span>
+  </div>
+{{end}}
+{{end}}
+
+{{define "bottom"}}
+</main>
+<footer class="wrap bot">
+  <span>Reads state straight from the node — no copy of the chain of its own.</span>
+  <span class="dim">Times in UTC, amounts in POWM (1 POWM = 10⁸ cogs).</span>
+</footer>
+</body>
+</html>
+{{end}}
+
+{{/* The global header — THE SAME markup as src/components/SiteHeader.astro in the web repo.
+     The style is shared in /site-header.css. Change both places together. */}}
+{{define "siteheader"}}
+<header class="site-header">
+  <div class="site-header-in">
+    <a class="site-brand" href="/">
+      <span class="site-brand-mark">
+        <svg viewBox="0 0 398 301" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="PowMachina">
+          <path d="M 201 18 L 18 18 L 57 63 L 183 63 L 196 76 L 54 219 L 53 280 L 258 77 Z"/>
+          <path d="M 152 86 L 54 86 L 54 180 L 53 181 L 54 184 L 53 185 Z"/>
+          <path d="M 342 86 L 285 86 L 85 280 L 142 280 Z"/>
+          <path d="M 379 86 L 175 281 L 237 280 L 330 190 L 331 281 L 378 282 Z"/>
+        </svg>
+      </span>
+      <span class="site-brand-name">PowMachina</span>
+    </a>
+    <nav class="site-nav" aria-label="Sections">
+      <a href="/how-it-works/">How it works</a>
+      <a href="{{url "/"}}" aria-current="page">Explorer</a>
+      <span class="soon">Pool<i>soon</i></span>
+      <span class="soon">Wallet<i>soon</i></span>
+      <span class="soon">Whitepaper<i>soon</i></span>
+      <span class="soon">Download<i>soon</i></span>
+    </nav>
+    <div class="site-theme" role="group" aria-label="Theme">
+      <a class="t-light" href="{{.LightHref}}" data-set-theme="light" aria-label="Light theme" title="Light theme">
+        <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true" fill="none"
+             stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+          <circle cx="12" cy="12" r="4.2"/>
+          <path d="M12 2.6v2.2M12 19.2v2.2M2.6 12h2.2M19.2 12h2.2M5.4 5.4l1.6 1.6M17 17l1.6 1.6M18.6 5.4L17 7M7 17l-1.6 1.6"/>
+        </svg>
+      </a>
+      <a class="t-dark" href="{{.DarkHref}}" data-set-theme="dark" aria-label="Dark theme" title="Dark theme">
+        <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true" fill="none"
+             stroke="currentColor" stroke-width="1.6" stroke-linejoin="round">
+          <path d="M20 14.2A8.4 8.4 0 0 1 9.8 4a8.4 8.4 0 1 0 10.2 10.2z"/>
+        </svg>
+      </a>
+    </div>
+  </div>
+</header>
+{{end}}
+
+{{/* The explorer's section tabs + the search. The second level of navigation. */}}
+{{define "tabs"}}
+<div class="tabs-row">
+  <nav class="site-tabs" aria-label="Explorer">
+    <a href="{{url "/"}}"{{if eq .Tab "overview"}} aria-current="page"{{end}}>Overview</a>
+    <a href="{{url "/blocks"}}"{{if eq .Tab "blocks"}} aria-current="page"{{end}}>Blocks</a>
+    <a href="{{url "/txs"}}"{{if eq .Tab "txs"}} aria-current="page"{{end}}>Transactions</a>
+    <a href="{{url "/algorithms"}}"{{if eq .Tab "algorithms"}} aria-current="page"{{end}}>Algorithms</a>
+    <a href="{{url "/richlist"}}"{{if eq .Tab "richlist"}} aria-current="page"{{end}}>Rich list</a>
+  </nav>
+  <form class="search" action="{{url "/search"}}" method="get" role="search">
+    <input type="text" name="q" placeholder="Block height, block hash, txid or address"
+           spellcheck="false" autocomplete="off" aria-label="Search">
+    <button type="submit">Search</button>
+  </form>
+</div>
+{{end}}
+
+{{/* The algorithm tag. The letter C/G is the lane's name in consensus; on the page the full algorithm
+     name is written — "MachinaHash-C" says what a block was mined with, "C" says nothing. The
+     square before the name stays: filled = a GPU algorithm, hollow = CPU. */}}
+{{define "lanetag"}}<span class="lane-tag lane-{{.}}"><i aria-hidden="true"></i>{{algo .}}</span>{{end}}
