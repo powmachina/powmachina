@@ -397,7 +397,7 @@ func TestSharedHeaderAndTabs(t *testing.T) {
 		body := get(t, h, path).Body.String()
 		for _, want := range []string{
 			`href="/site-header.css"`, `class="site-header"`,
-			`>How it works</a>`, `>Explorer</a>`, `Pool<i>soon</i>`, `>Wallet</a>`, `Whitepaper<i>soon</i>`, `href="/download/">Download</a>`,
+			`>How it works</a>`, `>Explorer</a>`, `href="https://pool.powmachina.com/" rel="noopener">Pool</a>`, `>Wallet</a>`, `Whitepaper<i>soon</i>`, `href="/download/">Download</a>`,
 			`data-set-theme="dark"`,
 		} {
 			if !strings.Contains(body, want) {
