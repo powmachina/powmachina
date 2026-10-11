@@ -11,7 +11,7 @@ name: cuda-windows
 
 on:
   push:
-    branches: [main]
+    branches: [testnet]
     paths:
       - "machinahash-cuda/**"
       - ".github/workflows/cuda-windows.yml"
