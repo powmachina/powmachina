@@ -15,6 +15,7 @@ import (
 	"log"
 	"math"
 	"math/big"
+	"math/rand/v2"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -76,12 +77,17 @@ type task struct {
 	// block is the block's own target, read from the header's bits: a job from a pool carries only the
 	// share target, and the miner must never look for anything harder than a block.
 	block [32]byte
+	// base is where the devices start counting nonces for this task, drawn at random. A pool sends the
+	// same header again whenever it changes the share target; started from zero each time, a miner
+	// would search one stretch of nonces over and over, and a header that holds no block in that
+	// stretch would never give one.
+	base uint64
 }
 
 // newTask reads the block target out of the job's header. A header whose bits do not decode leaves it
 // zero, which only means the target is never capped.
 func newTask(j *work.Job) *task {
-	t := &task{job: j}
+	t := &task{job: j, base: rand.Uint64() >> 16}
 	if block, err := chain.CompactToTarget(binary.LittleEndian.Uint32(j.PoW[72:76])); err == nil {
 		t.block = block
 	}
@@ -523,7 +529,7 @@ func (m *Miner) work(start, stride uint64, h *mh.Hasher, cpu int) {
 			m.opt.Log.Printf("hash: %v", err)
 			return
 		}
-		nonce := start
+		nonce := start + t.base/stride*stride // a multiple of the stride keeps the threads apart
 		pipe.Start(nonce)
 		var out [32]byte
 		for l.job.Load() == t {
@@ -605,7 +611,7 @@ func (m *Miner) gpuWork(idx int, g GPU) {
 				continue
 			}
 			if t != cur {
-				nonce = uint64(idx) << 56 // a new target on the same job carries on where it was
+				nonce = uint64(idx)<<56 + t.base // a new target on the same job carries on where it was
 			}
 			cur, curTighten = t, tighten
 		}

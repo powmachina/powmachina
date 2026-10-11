@@ -135,11 +135,13 @@ func TestBlocksSurviveAFloodOfShares(t *testing.T) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+	// Where the threads started: the task's base, rounded down to the stride.
+	first := m.lanes[mh.LaneC].job.Load().base / 2 * 2
 	close(quit)
 	<-done
 
-	// What the miner covered: the two threads walk nonces 0, 2, 4… and 1, 3, 5…, both to the same depth
-	// give or take a couple of batches. Check the range every thread certainly finished.
+	// What the miner covered: the two threads walk nonces first, first+2… and first+1, first+3…, both to
+	// the same depth give or take a couple of batches. Check the range every thread certainly finished.
 	covered := m.Hashes() - 1024
 	rx, err := mh.NewRandomXForMiner(j.Epoch, false, false, false)
 	if err != nil {
@@ -159,7 +161,7 @@ func TestBlocksSurviveAFloodOfShares(t *testing.T) {
 	total := len(feed.got)
 	feed.mu.Unlock()
 	blocks := 0
-	for n := uint64(0); n < covered; n++ {
+	for n := first; n < first+covered; n++ {
 		hdr := j.PoW
 		out, err := h.HashLaneC(&hdr, n)
 		if err != nil {
@@ -217,5 +219,23 @@ func TestMeasureLeavesOutSecondsWithoutWork(t *testing.T) {
 	l.job.Store(nil)
 	if _, ok := l.measure(t0.Add(40*time.Second), 1000); ok {
 		t.Fatal("two seconds of work were reported as a rate")
+	}
+}
+
+// A pool sends the same header again with every new share target. Two tasks made from one job must not
+// start at the same nonce, or the miner searches the same stretch each time and a block outside it is
+// never found.
+func TestTheSameJobIsSearchedFromAnotherPlace(t *testing.T) {
+	j := &work.Job{}
+	seen := map[uint64]bool{}
+	for range 8 {
+		seen[newTask(j).base] = true
+	}
+	if len(seen) < 8 {
+		t.Fatalf("8 tasks of one job start at %d places", len(seen))
+	}
+	// the top byte of a nonce tells the cards apart, the base must leave it alone
+	if b := newTask(j).base; b>>56 != 0 {
+		t.Fatalf("the base %x reaches into the card's bits", b)
 	}
 }
