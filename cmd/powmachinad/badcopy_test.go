@@ -70,8 +70,12 @@ func TestTamperedWitnessCostsTheCopyNotTheBlock(t *testing.T) {
 	if node.store.IsInvalid(id) {
 		t.Fatal("the block was marked invalid for a copy of its body")
 	}
-	if _, h, tip := node.chain.Tip(); h != 3 || tip != id {
-		t.Fatalf("the header tip moved off the block: height %d", h)
+	// The block waits for a copy that validates; the tip does not sit on it in the meantime.
+	if !node.chain.IsParked(id) || !node.chain.Has(id) {
+		t.Fatal("the block should be parked, with its header kept")
+	}
+	if _, h, _ := node.chain.Tip(); h != 2 {
+		t.Fatalf("the tip is at %d while the block has no valid body, want 2", h)
 	}
 	if node.store.HasBody(id) {
 		t.Fatal("the tampered body is still stored — it would be served to peers and never asked for again")
@@ -89,6 +93,9 @@ func TestTamperedWitnessCostsTheCopyNotTheBlock(t *testing.T) {
 	}
 	if applied, _ := node.appliedHeight(); applied != 3 {
 		t.Fatalf("the honest copy was not applied: height %d", applied)
+	}
+	if _, h, tip := node.chain.Tip(); h != 3 || tip != id || node.chain.IsParked(id) {
+		t.Fatalf("the block did not get the tip back: height %d", h)
 	}
 	if honest.BanScore() != 0 {
 		t.Fatalf("the honest peer has a ban score of %d", honest.BanScore())

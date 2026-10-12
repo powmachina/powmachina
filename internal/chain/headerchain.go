@@ -48,7 +48,10 @@ type HeaderChain struct {
 	byID   map[[32]byte]*node
 	// invalid are the blocks whose body failed validation. A child of an invalid block is
 	// invalid too — see invalid.go.
-	invalid  map[[32]byte]bool
+	invalid map[[32]byte]bool
+	// parked are the blocks whose body does not come. Neither they nor what grows out of them
+	// can be the tip — see parked.go.
+	parked   map[[32]byte]bool
 	tip      *node
 	genesis  [32]byte
 	finality *FinalityState
@@ -100,6 +103,36 @@ func (hc *HeaderChain) TrustedWork() bool {
 	hc.mu.RLock()
 	defer hc.mu.RUnlock()
 	return hc.tip.work.Cmp(min) >= 0
+}
+
+// anchoredLocked says whether the active branch is one the node may defend: it has passed the last
+// checkpoint and has at least the work the network had when the binary was made.
+//
+// Until then the node is on its first download and knows nothing about the chain it holds except that
+// somebody sent it. The rules that protect a chain against being replaced — the fork depth limit, MESS
+// — must not protect that one: the first peer to answer could hand over a few hundred cheap headers
+// and the node would then refuse the real chain for forking too deep, for good. An unanchored node
+// follows the most work, from any depth.
+//
+// On a network with no checkpoint and no MinChainWork every chain is anchored: there is nothing to
+// measure it against.
+func (hc *HeaderChain) anchoredLocked() bool {
+	if min := hc.params.MinWork(); min != nil && hc.tip.work.Cmp(min) < 0 {
+		return false
+	}
+	for _, cp := range hc.params.Checkpoints {
+		if hc.tip.height < cp.Height {
+			return false
+		}
+	}
+	return true
+}
+
+// Anchored is anchoredLocked for callers outside.
+func (hc *HeaderChain) Anchored() bool {
+	hc.mu.RLock()
+	defer hc.mu.RUnlock()
+	return hc.anchoredLocked()
 }
 
 func (hc *HeaderChain) Work() *big.Int {
@@ -197,7 +230,10 @@ func (hc *HeaderChain) checkLocked(h *Header, id [32]byte) (*node, error) {
 	// A side branch may fork at most ReorgLimit below the tip (and not below finality). The node
 	// would never accept a deeper one anyway — and storing it would let an attacker fill memory
 	// with cheap headers from early heights, where the difficulty was low.
-	if parent != hc.tip {
+	//
+	// Only for a chain the node may defend (anchoredLocked): below the last checkpoint the limit
+	// would be measured from whatever the first peer sent.
+	if parent != hc.tip && hc.anchoredLocked() {
 		fork := hc.forkPointBoundedLocked(parent, ReorgLimit)
 		if fork == nil {
 			return nil, ErrForkTooDeep
@@ -263,11 +299,24 @@ func (hc *HeaderChain) AddHeader(h *Header, pow PoWChecker) (bool, error) {
 		hc.tip = n
 		return true, nil
 	}
+	// A header above a parked block is filed and waits with it.
+	if hc.hasParkedAncestorLocked(n) {
+		return false, nil
+	}
 	return hc.maybeReorgLocked(n)
 }
 
 // maybeReorgLocked decides about switching to a competing branch — through MESS and with respect to finality.
 func (hc *HeaderChain) maybeReorgLocked(candidate *node) (bool, error) {
+	if !hc.anchoredLocked() {
+		// A chain that has not reached the checkpoints has no first-seen advantage and no depth
+		// to hide behind: more work wins.
+		if candidate.work.Cmp(hc.tip.work) <= 0 {
+			return false, nil
+		}
+		hc.tip = candidate
+		return true, nil
+	}
 	fork := hc.forkPointBoundedLocked(candidate, ReorgLimit+1)
 	if fork == nil {
 		return false, nil

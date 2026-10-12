@@ -86,7 +86,8 @@ func (hc *HeaderChain) InvalidIDs() [][32]byte {
 	return out
 }
 
-// bestValidLocked picks the heaviest node that does not grow out of an invalid block.
+// bestValidLocked picks the heaviest node that does not grow out of an invalid block or out of a
+// parked one.
 //
 // It walks every known node — this only happens on an invalidation, not in ordinary operation.
 // With equal work the lower id decides, so the result is the same on every node.
@@ -94,7 +95,7 @@ func (hc *HeaderChain) bestValidLocked() *node {
 	memo := make(map[[32]byte]bool, len(hc.byID))
 	best := hc.byID[hc.genesis]
 	for _, n := range hc.byID {
-		if hc.hasInvalidAncestorLocked(n, memo) {
+		if hc.hasInvalidAncestorLocked(n, memo) || hc.hasParkedAncestorLocked(n) {
 			continue
 		}
 		switch n.work.Cmp(best.work) {

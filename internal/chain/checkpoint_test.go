@@ -120,3 +120,27 @@ func TestMustIDRejectsGarbage(t *testing.T) {
 		t.Error("mustID reverses the byte order — RPC and Header.ID() do not reverse it")
 	}
 }
+
+// The baked values are literals somebody pasted. They have to parse, the heights have to rise, and a
+// network that names a checkpoint has to name the work too — one without the other leaves the node
+// either unable to tell a short chain from the real one or unable to tell which chain it is on.
+func TestBakedCheckpointsAreWellFormed(t *testing.T) {
+	for _, p := range []NetParams{MainNet, TestNet, RegTest} {
+		var last uint64
+		for i, cp := range p.Checkpoints {
+			if cp.Height == 0 || (i > 0 && cp.Height <= last) {
+				t.Fatalf("%s: checkpoint %d is at height %d after %d", p.Name, i, cp.Height, last)
+			}
+			if cp.ID == ([32]byte{}) {
+				t.Fatalf("%s: checkpoint %d has no id", p.Name, i)
+			}
+			last = cp.Height
+		}
+		if p.MinChainWork != "" && p.MinWork() == nil {
+			t.Fatalf("%s: MinChainWork %q does not parse", p.Name, p.MinChainWork)
+		}
+		if (len(p.Checkpoints) > 0) != (p.MinChainWork != "") {
+			t.Fatalf("%s: a checkpoint and MinChainWork go together", p.Name)
+		}
+	}
+}

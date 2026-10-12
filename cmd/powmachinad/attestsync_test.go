@@ -19,10 +19,21 @@ import (
 // blocks, up to 40 minutes). When every node restarts at once — a new binary rolled out
 // everywhere — finality reads "—" and everybody waits for the next height.
 func TestNodeRequestsMissingAttestations(t *testing.T) {
+	requestsMissingAttestations(t, int(chain.FinalityDepth)+1)
+}
+
+// The same on a chain longer than one request covers. The source keeps attestations from its
+// finalized height up and nothing below, so a node that asked for the oldest heights it lacks got
+// empty answers for ever.
+func TestNodeRequestsTheNewestAttestationsOnALongChain(t *testing.T) {
+	requestsMissingAttestations(t, int(chain.FinalityDepth)+p2p.MaxAttestHeights+7)
+}
+
+func requestsMissingAttestations(t *testing.T, blocks int) {
 	// A node that has the attestations.
 	source, srcAddr, cleanup := listeningNode(t)
 	defer cleanup()
-	if err := source.MineBlocks(int(chain.FinalityDepth) + 1); err != nil {
+	if err := source.MineBlocks(blocks); err != nil {
 		t.Fatal(err)
 	}
 	_, height, _ := source.chain.Tip()

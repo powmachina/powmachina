@@ -186,3 +186,65 @@ func TestRemoveConfirmedDropsConflicts(t *testing.T) {
 		t.Fatalf("the conflicting transaction should have disappeared from the pool, %d remained", m.Len())
 	}
 }
+
+// A transaction no block has room for is refused at the door: accepted, it would be relayed to every
+// peer and sit in the pool until it expired, never mined.
+func TestMempoolRefusesATransactionNoBlockCanHold(t *testing.T) {
+	m, u, sk, pk, _, _ := poolSetup(t)
+	op := Outpoint{TxID: [32]byte{201}, Index: 0}
+	coin := Coin{Value: 1000 * POWM, Script: pk, Height: 1}
+	u.AddCoin(op, coin)
+	var outs []TxOut
+	for len(outs)*MaxScriptBytes <= MaxBlockBytes-MaxCoinbaseBytes {
+		outs = append(outs, TxOut{Value: POWM, ScriptVersion: 1, Script: make([]byte, MaxScriptBytes)})
+	}
+	tx := signedSpend(t, sk, op, coin, outs)
+	if err := tx.CheckSanity(); err != nil {
+		t.Fatalf("setup: the transaction should be sane on its own: %v", err)
+	}
+	if _, err := m.Accept(tx, u, 10); !errors.Is(err, ErrTxTooBig) {
+		t.Fatalf("a %d B transaction: %v, want ErrTxTooBig", len(tx.Serialize()), err)
+	}
+}
+
+// After a reorg the confirmed state is another one. What the pool holds is checked against it again:
+// a transaction whose coin is gone falls out and takes its children along, the rest stays.
+func TestMempoolRevalidateDropsWhatNoLongerHolds(t *testing.T) {
+	m, u, sk, pk, op, coin := poolSetup(t)
+	other := Outpoint{TxID: [32]byte{202}, Index: 0}
+	otherCoin := Coin{Value: 1_000_000, Script: pk, Height: 1}
+	u.AddCoin(other, otherCoin)
+
+	parent := signedSpend(t, sk, op, coin, []TxOut{{Value: 900_000, Script: pk}})
+	if _, err := m.Accept(parent, u, 10); err != nil {
+		t.Fatal(err)
+	}
+	parentOut := Outpoint{TxID: parent.TxID(), Index: 0}
+	child := signedSpend(t, sk, parentOut, Coin{Value: 900_000, Script: pk, Height: 10},
+		[]TxOut{{Value: 800_000, Script: pk}})
+	if _, err := m.Accept(child, u, 10); err != nil {
+		t.Fatal(err)
+	}
+	lone := signedSpend(t, sk, other, otherCoin, []TxOut{{Value: 900_000, Script: pk}})
+	if _, err := m.Accept(lone, u, 10); err != nil {
+		t.Fatal(err)
+	}
+
+	// Nothing changed: nothing falls out.
+	if dropped := m.Revalidate(u, 10); dropped != 0 || m.Len() != 3 {
+		t.Fatalf("an unchanged state dropped %d, %d left", dropped, m.Len())
+	}
+
+	// The new branch never had the coin the parent spends.
+	after := NewUTXOSet()
+	after.AddCoin(other, otherCoin)
+	if dropped := m.Revalidate(after, 10); dropped != 2 {
+		t.Fatalf("dropped %d transactions, want the parent and its child", dropped)
+	}
+	if _, ok := m.Get(lone.TxID()); !ok || m.Len() != 1 {
+		t.Fatal("the transaction that still holds did not stay")
+	}
+	if sel := m.Select(MaxBlockBytes-MaxCoinbaseBytes, MaxBlockStorageMass-CoinbaseStorageMassReserve); len(sel) != 1 {
+		t.Fatalf("a template would carry %d transactions, want 1", len(sel))
+	}
+}

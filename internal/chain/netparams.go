@@ -126,19 +126,20 @@ var (
 		// finality is therefore not proof of independence, it is proof that the code works.
 		FinalitySigners:   testnetSignerKeys(),
 		FinalityThreshold: FinalityThreshold,
-		// Empty on purpose: the testnet starts from its genesis and has no history to check
-		// against yet.
+		// Both values are produced by `scripts/bake-checkpoint.sh` and are re-baked before every
+		// release: the deeper the checkpoint, the less history can be slipped to a node syncing
+		// for the first time. The checkpoint sits on a block the finality quorum confirmed and
+		// at least ReorgLimit below the tip at baking time — any shallower and a reorg that
+		// nodes may still legitimately make would split old binaries from new ones.
+		// MinChainWork is taken from the tip, not from the checkpoint: the question it answers
+		// is "does this chain have at least as much work as the network had when this binary
+		// was made". Until a chain has both, the node does not defend it (anchoredLocked).
 		//
-		// Both are produced by `scripts/bake-checkpoint.sh`. A network is launched with them
-		// empty — there is no block to pin yet — and they are **baked into the first release
-		// after the chain has a finalized history** and re-baked in every one after: the deeper
-		// the checkpoint, the less history can be slipped to a node syncing for the first time.
-		// The checkpoint goes on a block the finality quorum confirmed — the
-		// least arbitrary choice available — and MinChainWork is taken from the tip at baking
-		// time, not from the checkpoint: the question it answers is "does this chain have at
-		// least as much work as the network had when this binary was released".
-		MinChainWork: "",
-		Checkpoints:  nil,
+		// Baked at height 1323.
+		MinChainWork: "1f98875b8",
+		Checkpoints: []Checkpoint{
+			{Height: 800, ID: mustID("abf5b0f5dd19d9c394129591c46deb67141932b3f5acf1f9df5b2ddb77b50d1b")},
+		},
 	}
 
 	// RegTest has a trivial difficulty so it can be tested without waiting for blocks.

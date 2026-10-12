@@ -40,6 +40,18 @@ if [ -z "$HEIGHT" ]; then
   HEIGHT=$FIN
 fi
 
+# A checkpoint closer to the tip than the reorg limit could name a block that nodes may still
+# legitimately reorganize away, and then old binaries and new ones would part for good.
+REORG_LIMIT=500
+if [ "$HEIGHT" -gt $((TIP - REORG_LIMIT)) ]; then
+  if [ "$TIP" -le "$REORG_LIMIT" ]; then
+    echo "the chain is at $TIP — too short for a checkpoint $REORG_LIMIT below the tip" >&2
+    exit 1
+  fi
+  echo "height $HEIGHT is within $REORG_LIMIT of the tip ($TIP) — using $((TIP - REORG_LIMIT))" >&2
+  HEIGHT=$((TIP - REORG_LIMIT))
+fi
+
 ID=$(rpc getblock "{\"height\":$HEIGHT}" | python3 -c 'import sys,json;print(json.load(sys.stdin)["result"]["id"])')
 
 # MinChainWork is taken **from the tip**, not from the checkpoint: it answers the question "does this
@@ -52,8 +64,7 @@ cat <<OUT
 # network $NET, tip $TIP, checkpoint at height $HEIGHT
 # ($(date -Is))
 
-		// Baked $(date +%Y-%m-%d) at height $TIP. The checkpoint is on a block confirmed by the
-		// finality quorum; MinChainWork is the chain's work at baking time.
+		// Baked at height $TIP.
 		MinChainWork: "$HEX",
 		Checkpoints: []Checkpoint{
 			{Height: $HEIGHT, ID: mustID("$ID")},

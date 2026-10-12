@@ -144,15 +144,26 @@ func decodeUndo(b []byte) (*chain.BlockUndo, error) {
 // ---------------------------------------------------------------- UTXO
 
 func (s *Store) Coin(op chain.Outpoint) (chain.Coin, bool) {
+	c, ok, _ := s.LookupCoin(op)
+	return c, ok
+}
+
+// LookupCoin is Coin that tells "there is no such coin" from "the coin could not be read". The
+// difference decides a block's fate: a block that spends a coin nobody has is invalid for ever, a
+// block the disk failed on is not.
+func (s *Store) LookupCoin(op chain.Outpoint) (chain.Coin, bool, error) {
 	v, err := s.get(keyCoin(op.TxID, op.Index))
+	if errors.Is(err, ErrNotFound) {
+		return chain.Coin{}, false, nil
+	}
 	if err != nil {
-		return chain.Coin{}, false
+		return chain.Coin{}, false, err
 	}
 	c, err := decodeCoin(v)
 	if err != nil {
-		return chain.Coin{}, false
+		return chain.Coin{}, false, fmt.Errorf("store: the coin %x:%d is corrupted: %w", op.TxID[:6], op.Index, err)
 	}
-	return c, true
+	return c, true, nil
 }
 
 // pebbleBatch is a chain.CoinBatch over an indexed Pebble batch. It has to be indexed because a

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"slices"
@@ -264,6 +265,7 @@ func (n *Node) SyncBodiesOnce(now time.Time) {
 		log.Printf("⚠ applying bodies failed: %v", err)
 	}
 	n.pollAttestations(now)
+	n.askForParked(now)
 
 	_, headerTip, _ := n.chain.Tip()
 	applied, err := n.appliedHeight()
@@ -272,6 +274,7 @@ func (n *Node) SyncBodiesOnce(now time.Time) {
 		return
 	}
 	if applied >= headerTip {
+		n.waitingForBody([32]byte{}, now)
 		n.pollHeaders(now) // nothing to pull — ask whether there is a new tip
 		return
 	}
@@ -279,11 +282,19 @@ func (n *Node) SyncBodiesOnce(now time.Time) {
 	cands := n.missingBodyIDs(applied+1, headerTip, n.bodies.window())
 	n.bodies.prune(cands)
 	if len(cands) == 0 {
+		n.waitingForBody([32]byte{}, now)
 		return
 	}
 
 	conns := n.connSnapshot()
 	if len(conns) == 0 {
+		n.waitingForBody([32]byte{}, now) // nobody to ask — that says nothing about the block
+		return
+	}
+	// The lowest missing body is the one everything above waits for. When it has not come for
+	// bodyParkAfter, the block is parked and the tip falls back to where blocks can be applied.
+	if n.waitingForBody(cands[0], now) >= bodyParkAfter {
+		n.parkBlock(cands[0])
 		return
 	}
 	if len(conns) == 1 {
@@ -317,6 +328,111 @@ func (n *Node) SyncBodiesOnce(now time.Time) {
 		}
 	}
 	n.warnStuckBody(now, applied+1, len(conns))
+}
+
+// bodyParkAfter is how long the UTXO set waits for one body, with peers to ask, before the block
+// is parked. Two request timeouts and a little: an honest body arrives with its header, and one
+// that got lost is delivered by the first retry.
+const bodyParkAfter = 45 * time.Second
+
+// parkedAskInterval is how often the bodies of parked blocks are asked for again.
+const parkedAskInterval = bodyRequestTimeout
+
+// waitingForBody notes which body the UTXO set is waiting for and returns how long it has been
+// waiting for that one. The zero id means it is waiting for nothing.
+func (n *Node) waitingForBody(id [32]byte, now time.Time) time.Duration {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.bodyWaitID != id {
+		n.bodyWaitID, n.bodyWaitSince = id, now
+	}
+	if id == ([32]byte{}) {
+		return 0
+	}
+	return now.Sub(n.bodyWaitSince)
+}
+
+// parkBlock takes a block whose body does not come out of the running for the tip.
+//
+// Without it a header announced without its body stops the chain for everybody: the tip sits on a
+// block nothing can be applied to, every miner builds on it, and no block found there can be
+// applied either. Parked, the block keeps its header and its place; mining goes on beside it, and
+// when the body does come the block competes for the tip again (storeBody).
+func (n *Node) parkBlock(id [32]byte) {
+	hdr, _ := n.chain.HeaderByID(id)
+	newTip, changed, err := n.chain.Park(id)
+	if err != nil {
+		log.Printf("⚠ parking block %x failed: %v", id[:6], err)
+		return
+	}
+	n.waitingForBody([32]byte{}, time.Time{})
+	n.bodies.forget(id)
+	height := uint32(0)
+	if hdr != nil {
+		height = hdr.Height
+	}
+	_, tipHeight, _ := n.chain.Tip()
+	if changed {
+		log.Printf("⚠ the body of block %d (%x) has not come for %s — the block is parked, the tip is back at %d (%x)",
+			height, id[:6], bodyParkAfter, tipHeight, newTip[:6])
+	} else {
+		log.Printf("⚠ the body of block %d (%x) has not come for %s — the block is parked", height, id[:6], bodyParkAfter)
+	}
+}
+
+// askForParked asks every peer for the bodies of parked blocks, once per parkedAskInterval. A parked
+// block is off the active branch, so the driver below no longer asks for it — and the body may be
+// one everybody else has.
+func (n *Node) askForParked(now time.Time) {
+	ids := n.chain.ParkedIDs()
+	if len(ids) == 0 {
+		return
+	}
+	n.mu.Lock()
+	due := now.Sub(n.lastParkedAsk) >= parkedAskInterval
+	if due {
+		n.lastParkedAsk = now
+	}
+	n.mu.Unlock()
+	if !due {
+		return
+	}
+	want := make([][32]byte, 0, len(ids))
+	for _, id := range ids {
+		if n.store.HasBody(id) {
+			n.unparkBlock(id) // the body is here already (it arrived before the park took hold)
+			continue
+		}
+		want = append(want, id)
+	}
+	if len(want) > p2p.MaxGetDataItems {
+		want = want[:p2p.MaxGetDataItems]
+	}
+	if len(want) == 0 {
+		return
+	}
+	payload, err := p2p.EncodeGetData(p2p.BlockItems(want))
+	if err != nil {
+		return
+	}
+	for _, c := range n.connSnapshot() {
+		_ = c.Send(&p2p.Message{Command: p2p.CmdGetData, Payload: payload})
+	}
+}
+
+// unparkBlock lets a block whose body has arrived compete for the tip again.
+func (n *Node) unparkBlock(id [32]byte) {
+	changed, err := n.chain.Unpark(id)
+	if err != nil {
+		log.Printf("the body of parked block %x arrived, its branch is not taken: %v", id[:6], err)
+		return
+	}
+	if changed {
+		_, h, tip := n.chain.Tip()
+		log.Printf("the body of parked block %x arrived — the tip is now %d (%x)", id[:6], h, tip[:6])
+	} else {
+		log.Printf("the body of parked block %x arrived — the tip stays where it is", id[:6])
+	}
 }
 
 // bodyStallWarn is how long a body may be missing before the node says so. It is above the
@@ -378,8 +494,12 @@ func (n *Node) pollAttestations(now time.Time) {
 	from := final + 1
 	count := deepest - from + 1
 	if count > p2p.MaxAttestHeights {
-		// We ask for the oldest missing heights — finality moves upwards from below.
+		// We ask for the newest heights that can be final. Peers keep attestations from their
+		// finalized height up and drop everything below it, so after a restart the oldest
+		// missing heights are exactly the ones nobody can answer for — asking for those left
+		// finality at zero until the quorum signed the next block.
 		count = p2p.MaxAttestHeights
+		from = deepest - count + 1
 	}
 	payload, err := p2p.EncodeGetAttest(from, uint16(count))
 	if err != nil {
@@ -413,6 +533,7 @@ func (n *Node) pollHeaders(now time.Time) {
 func (n *Node) ApplyReadyBodies() error {
 	n.applyMu.Lock()
 	defer n.applyMu.Unlock()
+	defer n.settleMempool()
 
 	// At most two rounds: when a body fails validation, the branch is marked invalid, the chain
 	// switches to the heaviest valid one and applying continues there. More rounds are not
@@ -431,7 +552,13 @@ func (n *Node) ApplyReadyBodies() error {
 		var failed *chain.Block
 		applied, err := n.store.ApplyStored(headerTip, store.ApplyHooks{
 			Validate: func(b *chain.Block) error {
-				if verr := b.ValidateBlock(n.store, n.params); verr != nil {
+				view := &checkedCoins{s: n.store}
+				if verr := b.ValidateBlock(view, n.params); verr != nil {
+					if view.err != nil {
+						// The disk failed, not the block: `failed` stays empty and nothing
+						// is marked.
+						return fmt.Errorf("reading the UTXO set: %w", view.err)
+					}
 					failed = b
 					return verr
 				}
@@ -456,7 +583,12 @@ func (n *Node) ApplyReadyBodies() error {
 		// is valid, the failure says something about this copy of the body and nothing about
 		// the block: marking the block invalid would let anybody who relays it cut us off from
 		// the chain by flipping a byte of a signature.
-		if failed.ValidateCommitted(n.store, n.params) == nil {
+		view := &checkedCoins{s: n.store}
+		committed := failed.ValidateCommitted(view, n.params)
+		if view.err != nil {
+			return fmt.Errorf("reading the UTXO set: %w", view.err)
+		}
+		if committed == nil {
 			return n.dropBadCopyLocked(failed, err)
 		}
 		if ierr := n.invalidateBranchLocked(failed, err); ierr != nil {
@@ -464,6 +596,22 @@ func (n *Node) ApplyReadyBodies() error {
 		}
 	}
 	return nil
+}
+
+// checkedCoins is the UTXO set as validation sees it, remembering a read that failed. To a
+// validator a coin that could not be read looks like a coin that does not exist, and a block that
+// spends a missing coin is marked invalid for good — a failing disk must not get that far.
+type checkedCoins struct {
+	s   *store.Store
+	err error
+}
+
+func (c *checkedCoins) Get(op chain.Outpoint) (chain.Coin, bool) {
+	coin, ok, err := c.s.LookupCoin(op)
+	if err != nil && c.err == nil {
+		c.err = err
+	}
+	return coin, ok
 }
 
 // invalidateBranchLocked marks a block invalid, switches the chain to the heaviest valid
@@ -511,7 +659,16 @@ func (n *Node) dropBadCopyLocked(blk *chain.Block, why error) error {
 	n.bodies.badBody()
 	log.Printf("⚠ the body of block %d (%x) from %s failed validation: %v — the copy is dropped, the block stays",
 		blk.Header.Height, id[:6], from, why)
-	return n.store.DropBody(id)
+	if err := n.store.DropBody(id); err != nil {
+		return err
+	}
+	// Until a copy that validates turns up, the block is parked: the tip must not sit on a block
+	// nothing can be applied to, whether its body is missing or keeps arriving tampered with.
+	if _, _, err := n.chain.Park(id); err != nil {
+		return err
+	}
+	n.bodies.forget(id)
+	return nil
 }
 
 // relayApplied hands a block that has just been applied on to the other peers, whole, so the
@@ -552,11 +709,69 @@ func (n *Node) reconcileUTXOTip() error {
 		if tip.Height == 0 {
 			return fmt.Errorf("the UTXO tip is at height 0 and does not match the genesis — a corrupted datadir")
 		}
+		// The transactions of a block that leaves the chain are unconfirmed again. They are
+		// offered back to the mempool once the new branch is applied; without the body there
+		// is nothing to offer, and the reorg goes on regardless.
+		if blk, berr := n.store.Block(tip.ID); berr == nil && len(n.reverted) < maxRevertedTxs {
+			for _, tx := range blk.Txs[1:] {
+				n.reverted = append(n.reverted, tx)
+			}
+		}
+		n.reorged = true
 		if err := n.store.RevertTip(); err != nil {
 			return fmt.Errorf("UTXO reorg: %w", err)
 		}
 		log.Printf("reorg: the UTXO set rolled back below height %d (block %x is no longer on the active branch)",
 			tip.Height, tip.ID[:6])
+	}
+}
+
+// maxRevertedTxs bounds how many transactions of rolled-back blocks are kept for the mempool. A
+// reorg deep enough to exceed it is not one where the pool is what matters.
+const maxRevertedTxs = 20_000
+
+// settleMempool brings the mempool in line with the chain after a reorg. Called with applyMu held,
+// at the end of ApplyReadyBodies.
+//
+// The pool was filled against the branch that lost. A transaction in it may spend an output the
+// new branch never created or has already spent; a template with such a transaction is a block
+// the node would refuse itself. And the transactions of the blocks that were rolled back are
+// unconfirmed again — unless the new branch confirmed them too, they belong back in the pool.
+func (n *Node) settleMempool() {
+	if !n.reorged {
+		return
+	}
+	reverted := n.reverted
+	n.reverted, n.reorged = nil, false
+
+	tip, err := n.store.Tip()
+	if err != nil {
+		return
+	}
+	dropped := n.mempool.Revalidate(n.store, tip.Height+1)
+	// The blocks were rolled back from the tip down, so a child can come before its parent:
+	// go round until a pass takes nothing.
+	back := 0
+	for waiting := reverted; len(waiting) > 0; {
+		var next []*chain.Tx
+		for _, tx := range waiting {
+			_, err := n.mempool.Accept(tx, n.store, tip.Height+1)
+			var miss *chain.MissingInputs
+			switch {
+			case err == nil:
+				back++
+			case errors.As(err, &miss):
+				next = append(next, tx)
+			}
+		}
+		if len(next) == len(waiting) {
+			break
+		}
+		waiting = next
+	}
+	if dropped > 0 || back > 0 {
+		log.Printf("reorg: the mempool dropped %d transactions that no longer hold and took back %d from the blocks rolled back",
+			dropped, back)
 	}
 }
 
@@ -651,6 +866,9 @@ func (n *Node) storeBody(peer *p2p.Peer, blk *chain.Block) error {
 	}
 	// Handing it onward waits for validation (relayApplied).
 	n.bodies.deliveredBy(id, peer)
+	if n.chain.IsParked(id) {
+		n.unparkBlock(id)
+	}
 	return nil
 }
 

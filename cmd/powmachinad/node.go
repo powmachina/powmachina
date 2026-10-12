@@ -91,6 +91,17 @@ type Node struct {
 	lastHeaderPoll time.Time
 	// lastBodyWarn is when the node last complained about a body nobody delivers (under n.mu).
 	lastBodyWarn time.Time
+	// reverted are the transactions of blocks the UTXO set rolled back in a reorg, and reorged
+	// says that it did (both under applyMu). The mempool is brought in line with the new branch
+	// once applying has caught up (settleMempool).
+	reverted []*chain.Tx
+	reorged  bool
+	// bodyWaitID and bodyWaitSince say which body the UTXO set is waiting for and since when
+	// (under n.mu) — a block whose body does not come is parked after bodyParkAfter.
+	bodyWaitID    [32]byte
+	bodyWaitSince time.Time
+	// lastParkedAsk is when the bodies of parked blocks were last asked for (under n.mu).
+	lastParkedAsk time.Time
 	// lastAttestPoll is when it last asked for missing finality attestations (under n.mu).
 	lastAttestPoll time.Time
 
@@ -767,6 +778,16 @@ func (n *Node) acceptHeaders(peer *p2p.Peer, headers []*chain.Header) (int, erro
 			continue
 		case err == chain.ErrUnknownParent:
 			// The peer sent headers out of order or from another branch — not a reason to ban.
+			continue
+		case errors.Is(err, chain.ErrTimeTooNew):
+			// "Too far in the future" is measured against our clock. When ours is behind, every
+			// honest peer sends such headers — charging them would cut a node with a slow clock
+			// off the network. The header is not filed; it will be offered again.
+			continue
+		case errors.Is(err, chain.ErrForkTooDeep):
+			// A branch that leaves ours deeper than we would ever reorganize. The peer may be on
+			// another chain, or we may be: neither is something to charge it for — a node that
+			// was fed a wrong history would otherwise ban the honest network one peer at a time.
 			continue
 		case errors.Is(err, chain.ErrInvalidAncestor):
 			// We have already thrown away a branch whose body failed validation. The peer

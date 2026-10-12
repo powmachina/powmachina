@@ -148,6 +148,12 @@ func (n *Node) Template(lane mh.Lane) (*rpc.Template, error) {
 		return nil, fmt.Errorf("lane %s is currently blocked by the rotation rule", lane)
 	}
 
+	// No work is handed out on a chain that has not reached the checkpoints or the work the
+	// network is known to have: it is either still being downloaded or it is not the network's.
+	if !n.chain.Anchored() {
+		return nil, errors.New("the chain is below the network's checkpoints — no work until it has synced")
+	}
+
 	tip, height, tipID := n.chain.Tip()
 	bits, err := n.chain.NextBitsFor(lane)
 	if err != nil {

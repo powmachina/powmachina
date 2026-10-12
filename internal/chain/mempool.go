@@ -45,6 +45,7 @@ var (
 	ErrMempoolFull      = errors.New("mempool: it is full and the transaction pays less than the others")
 	ErrCoinbaseInPool   = errors.New("mempool: a coinbase does not belong in the mempool")
 	ErrTxStorageMass    = errors.New("mempool: the transaction creates too many tiny outputs — it does not fit into a block")
+	ErrTxTooBig         = errors.New("mempool: the transaction is larger than the room a block has for transactions")
 	ErrChainTooLong     = errors.New("mempool: too many unconfirmed transactions in the chain (max 25) — wait for a block")
 )
 
@@ -113,10 +114,18 @@ func (m *Mempool) Accept(tx *Tx, utxo CoinView, height uint64) (*MempoolEntry, e
 	if err := tx.CheckSanity(); err != nil {
 		return nil, err
 	}
+	// A transaction no block has room for would sit in the pool until it expired, relayed to
+	// every peer and never mined. The size is known before anything costly is checked.
+	if size := len(tx.Serialize()); size > MaxBlockBytes-MaxCoinbaseBytes {
+		return nil, fmt.Errorf("%w (%d B, room %d B)", ErrTxTooBig, size, MaxBlockBytes-MaxCoinbaseBytes)
+	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.acceptLocked(tx, utxo, height)
+}
 
+func (m *Mempool) acceptLocked(tx *Tx, utxo CoinView, height uint64) (*MempoolEntry, error) {
 	txid := tx.TxID()
 	if _, dup := m.entries[txid]; dup {
 		return nil, ErrMempoolDuplicate
@@ -229,6 +238,50 @@ func (m *Mempool) Accept(tx *Tx, utxo CoinView, height uint64) (*MempoolEntry, e
 		m.spent[Outpoint{TxID: in.PrevTxID, Index: in.PrevIndex}] = txid
 	}
 	return e, nil
+}
+
+// Revalidate checks every transaction in the pool against a new confirmed state and drops those that
+// no longer hold. It returns how many were dropped.
+//
+// It is for after a reorg. The pool was built against a chain that is no longer the active one: a
+// transaction may spend an output that now does not exist, or one the new branch already spent, and
+// a template that includes it is a block the node itself will refuse.
+//
+// The transactions go back in the order they came, so a parent is in before its child; a child whose
+// parent fell out falls out with it.
+func (m *Mempool) Revalidate(utxo CoinView, height uint64) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	old := make([]*MempoolEntry, 0, len(m.entries))
+	for _, e := range m.entries {
+		old = append(old, e)
+	}
+	sort.SliceStable(old, func(i, j int) bool { return old[i].Added.Before(old[j].Added) })
+	m.entries = make(map[[32]byte]*MempoolEntry, len(old))
+	m.spent = make(map[Outpoint][32]byte)
+	m.bytes = 0
+
+	// A parent and its child can carry the same timestamp, so one pass is not enough: go round
+	// until a pass brings nothing back.
+	waiting := old
+	for len(waiting) > 0 {
+		var next []*MempoolEntry
+		for _, e := range waiting {
+			kept, err := m.acceptLocked(e.Tx, utxo, height)
+			var miss *MissingInputs
+			switch {
+			case err == nil:
+				kept.Added = e.Added
+			case errors.As(err, &miss):
+				next = append(next, e)
+			}
+		}
+		if len(next) == len(waiting) {
+			break
+		}
+		waiting = next
+	}
+	return len(old) - len(m.entries)
 }
 
 // ancestorsLocked returns the transaction's ancestors that are in the pool (excluding itself).
