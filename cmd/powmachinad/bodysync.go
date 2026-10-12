@@ -293,7 +293,14 @@ func (n *Node) SyncBodiesOnce(now time.Time) {
 	}
 	// The lowest missing body is the one everything above waits for. When it has not come for
 	// bodyParkAfter, the block is parked and the tip falls back to where blocks can be applied.
-	if n.waitingForBody(cands[0], now) >= bodyParkAfter {
+	//
+	// The wait counts only while bodies can arrive at all: a peer whose batch of headers is still
+	// being verified cannot hand over anything else, so the clock starts again once it is done.
+	// Otherwise a node on its first download would park the block it is about to receive.
+	switch waited := n.waitingForBody(cands[0], now); {
+	case n.verifyingHeaders.Load() > 0:
+		n.waitingForBody([32]byte{}, now)
+	case waited >= bodyParkAfter:
 		n.parkBlock(cands[0])
 		return
 	}

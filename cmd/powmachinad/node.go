@@ -15,6 +15,7 @@ import (
 	"powmachina/internal/store"
 	"powmachina/internal/stratum"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"powmachina/internal/address"
@@ -91,6 +92,10 @@ type Node struct {
 	lastHeaderPoll time.Time
 	// lastBodyWarn is when the node last complained about a body nobody delivers (under n.mu).
 	lastBodyWarn time.Time
+	// verifyingHeaders counts the header batches being verified right now. A connection reads
+	// one message at a time, so while its batch is being verified — over a minute for a full
+	// message without the full DAG — no body can arrive on it, however willing the peer.
+	verifyingHeaders atomic.Int32
 	// reverted are the transactions of blocks the UTXO set rolled back in a reorg, and reorged
 	// says that it did (both under applyMu). The mempool is brought in line with the new branch
 	// once applying has caught up (settleMempool).
@@ -750,6 +755,8 @@ func (n *Node) handle(conn *p2p.Conn, peer *p2p.Peer, msg *p2p.Message) error {
 }
 
 func (n *Node) acceptHeaders(peer *p2p.Peer, headers []*chain.Header) (int, error) {
+	n.verifyingHeaders.Add(1)
+	defer n.verifyingHeaders.Add(-1)
 	added, tipMoved, invalidSeen := 0, false, 0
 	for _, h := range headers {
 		// The height in a header is whatever the peer wrote there. The epoch — a DAG of gigabytes

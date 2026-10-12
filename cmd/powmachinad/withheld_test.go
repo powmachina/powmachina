@@ -45,6 +45,16 @@ func TestWithheldBodyDoesNotStopTheChain(t *testing.T) {
 
 	now := time.Now()
 	node.SyncBodiesOnce(now)
+	// While a batch of headers is being verified its connection can deliver nothing else: that
+	// time does not count, and the wait starts again when the batch is done.
+	node.verifyingHeaders.Add(1)
+	node.SyncBodiesOnce(now.Add(2 * bodyParkAfter))
+	node.verifyingHeaders.Add(-1)
+	if node.chain.IsParked(withheld) {
+		t.Fatal("the block was parked while headers were being verified")
+	}
+	now = now.Add(2 * bodyParkAfter)
+	node.SyncBodiesOnce(now)
 	node.SyncBodiesOnce(now.Add(bodyParkAfter - time.Second))
 	if node.chain.IsParked(withheld) {
 		t.Fatal("the block was parked before bodyParkAfter")
