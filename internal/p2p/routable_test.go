@@ -10,7 +10,7 @@ import (
 // server for scanning an internal network.
 func TestRoutable(t *testing.T) {
 	no := []string{
-		"0.0.0.0", "0.1.2.3", // „this network“
+		"0.0.0.0", "0.1.2.3", // "this network"
 		"127.0.0.1", "::1", // loopback
 		"0.0.0.0", "0.1.2.3", // "this network"
 		"100.64.0.1",           // CGNAT

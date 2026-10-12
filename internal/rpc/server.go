@@ -714,12 +714,12 @@ func (s *Server) getAddress(params json.RawMessage) (any, error) {
 
 	// Group the movements by transaction and compute the net amount.
 	type row struct {
-		TxID     string `json:"txid"`
-		Height   uint64 `json:"height"`
-		NetCogs  int64  `json:"net_cogs"`
-		InCogs   int64  `json:"in_cogs"`
-		OutCogs  int64  `json:"out_cogs"`
-		Directon string `json:"direction"`
+		TxID      string `json:"txid"`
+		Height    uint64 `json:"height"`
+		NetCogs   int64  `json:"net_cogs"`
+		InCogs    int64  `json:"in_cogs"`
+		OutCogs   int64  `json:"out_cogs"`
+		Direction string `json:"direction"`
 	}
 	order := make([][32]byte, 0, len(entries))
 	byTx := make(map[[32]byte]*row, len(entries))
@@ -742,11 +742,11 @@ func (s *Server) getAddress(params json.RawMessage) (any, error) {
 		r.NetCogs = r.InCogs - r.OutCogs
 		switch {
 		case r.NetCogs > 0:
-			r.Directon = "in"
+			r.Direction = "in"
 		case r.NetCogs < 0:
-			r.Directon = "out"
+			r.Direction = "out"
 		default:
-			r.Directon = "self"
+			r.Direction = "self"
 		}
 		txs = append(txs, *r)
 	}

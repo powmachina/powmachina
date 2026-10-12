@@ -80,7 +80,7 @@ func TestTxIndexFindsEveryTransaction(t *testing.T) {
 //
 // If a record stayed after a revert, the node would claim a transaction from an unwound branch is in
 // the chain — and that is exactly what breaks explorers built on a separate database.
-// (iquidus: „orphaned blocks… reports them against related address's balances").
+// (iquidus: "orphaned blocks… reports them against related address's balances").
 func TestTxIndexUnwindsWithReorg(t *testing.T) {
 	s, err := OpenMemWith(Options{TxIndex: true})
 	if err != nil {

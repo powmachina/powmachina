@@ -317,16 +317,19 @@ func TestPingDropsSilentPeer(t *testing.T) {
 		client.mu.Lock()
 		conns = len(client.conns)
 		client.mu.Unlock()
-		if conns == 0 {
+		// The connection leaves the table first and its slot is freed a moment later, so the
+		// two are waited for together.
+		slots := client.peers.Count(p2p.PeerOutboundFull)
+		if conns == 0 && slots == 0 {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("the silent peer was not hung up")
+			if conns != 0 {
+				t.Fatal("the silent peer was not hung up")
+			}
+			t.Fatalf("the slot after the hung-up peer was not freed (%d)", slots)
 		}
 		time.Sleep(10 * time.Millisecond)
-	}
-	if got := client.peers.Count(p2p.PeerOutboundFull); got != 0 {
-		t.Fatalf("the slot after the hung-up peer was not freed (%d)", got)
 	}
 }
 
