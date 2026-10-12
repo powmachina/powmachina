@@ -81,6 +81,30 @@ func DeserializeBlock(data []byte) (*Block, error) {
 // The header (PoW, difficulty, time, lane rotation) is verified in HeaderChain.AddHeader — this is
 // about the transactions, the values and the coinbase.
 func (b *Block) ValidateBlock(u CoinView, params NetParams) error {
+	return b.validate(u, params, true)
+}
+
+// ValidateCommitted validates what the header commits to: the block with every witness taken out and
+// no signature verified. The id of a block covers the transactions without their witnesses, so the
+// same id can arrive with witnesses other than the miner's.
+//
+// It answers one question after ValidateBlock has failed: is the block bad, or only this copy of it? If
+// the committed part is invalid, no witness can save the block. If it is valid, the failure came from
+// the witnesses, and those the header says nothing about.
+func (b *Block) ValidateCommitted(u CoinView, params NetParams) error {
+	bare := &Block{Header: b.Header, Txs: make([]*Tx, len(b.Txs))}
+	for i, tx := range b.Txs {
+		if tx == nil {
+			return ErrNoCoinbase
+		}
+		c := *tx
+		c.Witness = nil
+		bare.Txs[i] = &c
+	}
+	return bare.validate(u, params, false)
+}
+
+func (b *Block) validate(u CoinView, params NetParams, signatures bool) error {
 	raw := b.Serialize()
 	if len(raw) > MaxBlockBytes {
 		return ErrBlockTooBig
@@ -118,7 +142,7 @@ func (b *Block) ValidateBlock(u CoinView, params NetParams) error {
 
 		var inValues []int64
 		if i > 0 {
-			fee, values, err := b.checkInputs(tx, u, inBlock, spent, height)
+			fee, values, err := b.checkInputs(tx, u, inBlock, spent, height, signatures)
 			if err != nil {
 				return fmt.Errorf("transaction %d: %w", i, err)
 			}
@@ -153,7 +177,7 @@ func (b *Block) ValidateBlock(u CoinView, params NetParams) error {
 // checkInputs verifies one transaction's inputs: their existence, maturity, double spending and
 // the conservation of value. It returns the fee.
 func (b *Block) checkInputs(tx *Tx, u CoinView, inBlock map[Outpoint]Coin,
-	spent map[Outpoint]bool, height uint64) (int64, []int64, error) {
+	spent map[Outpoint]bool, height uint64, signatures bool) (int64, []int64, error) {
 
 	var inSum int64
 	// The coins are all collected first — the sighash commits to the amounts and the scripts of
@@ -185,6 +209,9 @@ func (b *Block) checkInputs(tx *Tx, u CoinView, inBlock map[Outpoint]Coin,
 	// The signatures are verified last — they are the most expensive and there is no point
 	// computing them for a transaction that fails a cheaper check.
 	for i := range tx.Inputs {
+		if !signatures {
+			break
+		}
 		if err := VerifyInput(tx, i, coins); err != nil {
 			return 0, nil, fmt.Errorf("input %d: %w", i, err)
 		}

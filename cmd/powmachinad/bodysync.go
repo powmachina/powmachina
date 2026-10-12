@@ -79,7 +79,17 @@ type bodySync struct {
 	delivered uint64
 	timeouts  uint64
 	mismatch  uint64
+
+	// src is who delivered a body that is stored and not applied yet. Applying decides what
+	// becomes of it: a body that validates is handed on to everybody else, one that fails on its
+	// witnesses costs the peer that sent it.
+	src map[[32]byte]*p2p.Peer
 }
+
+// maxBodySources bounds src. Bodies of side branches are stored and never applied, so their
+// entries would stay; at the cap the map starts over, and the worst that follows is a block
+// announced back to the peer it came from.
+const maxBodySources = 4096
 
 type bodyRequest struct {
 	sent time.Time
@@ -88,7 +98,30 @@ type bodyRequest struct {
 
 func newBodySync() *bodySync {
 	return &bodySync{timeout: bodyRequestTimeout, batch: p2p.MaxGetDataItems,
-		inflight: make(map[[32]byte]bodyRequest)}
+		inflight: make(map[[32]byte]bodyRequest), src: make(map[[32]byte]*p2p.Peer)}
+}
+
+// deliveredBy remembers who a stored body came from.
+func (b *bodySync) deliveredBy(id [32]byte, peer *p2p.Peer) {
+	if peer == nil {
+		return
+	}
+	b.mu.Lock()
+	if len(b.src) >= maxBodySources {
+		clear(b.src)
+	}
+	b.src[id] = peer
+	b.mu.Unlock()
+}
+
+// source returns who delivered a body and forgets it. Nil for a body that was on disk at startup
+// or came from a block mirror.
+func (b *bodySync) source(id [32]byte) *p2p.Peer {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	peer := b.src[id]
+	delete(b.src, id)
+	return peer
 }
 
 // take picks from the candidates those that may be requested from peer `from` now and records
@@ -404,7 +437,10 @@ func (n *Node) ApplyReadyBodies() error {
 				}
 				return nil
 			},
-			Applied: n.onBlockApplied,
+			Applied: func(b *chain.Block) {
+				n.onBlockApplied(b)
+				n.relayApplied(b)
+			},
 		})
 		if applied > 0 {
 			tip, _ := n.store.Tip()
@@ -415,6 +451,13 @@ func (n *Node) ApplyReadyBodies() error {
 		}
 		if failed == nil {
 			return err // something other than validation failed (storage)
+		}
+		// The id of a block does not cover the witnesses. When everything the header commits to
+		// is valid, the failure says something about this copy of the body and nothing about
+		// the block: marking the block invalid would let anybody who relays it cut us off from
+		// the chain by flipping a byte of a signature.
+		if failed.ValidateCommitted(n.store, n.params) == nil {
+			return n.dropBadCopyLocked(failed, err)
 		}
 		if ierr := n.invalidateBranchLocked(failed, err); ierr != nil {
 			return ierr
@@ -448,7 +491,46 @@ func (n *Node) invalidateBranchLocked(blk *chain.Block, why error) error {
 		log.Printf("the chain switched to the heaviest valid branch: height %d (%x)", h, newTip[:6])
 	}
 	n.bodies.forget(id)
+	n.bodies.source(id)
 	return nil
+}
+
+// dropBadCopyLocked throws away a body that failed validation on its witnesses and leaves the
+// block alone, so the driver asks for the body again. Called with applyMu held.
+//
+// The peer that delivered it pays: a node relays a body only once it has validated it, so an
+// honest peer does not send such a copy. The price is below a ban — the sender may be passing on
+// what it was handed, or serving a body of a branch it never applied.
+func (n *Node) dropBadCopyLocked(blk *chain.Block, why error) error {
+	id := blk.Header.ID()
+	from := "disk or a mirror"
+	if peer := n.bodies.source(id); peer != nil {
+		from = addrOf(peer)
+		n.peers.Misbehaving(peer, p2p.MisbehaviorBadCopy)
+	}
+	n.bodies.badBody()
+	log.Printf("⚠ the body of block %d (%x) from %s failed validation: %v — the copy is dropped, the block stays",
+		blk.Header.Height, id[:6], from, why)
+	return n.store.DropBody(id)
+}
+
+// relayApplied hands a block that has just been applied on to the other peers, whole, so the
+// next hop does not have to ask for it.
+//
+// Only now, not when the body arrives: a body is checked against the header on arrival, and the
+// header does not cover the witnesses. Relaying before validation would carry a tampered copy
+// through the whole network ahead of the good one. And only near the tip: during a sync this
+// would push the whole history to every peer, and there the pull driver is the right tool.
+func (n *Node) relayApplied(blk *chain.Block) {
+	peer := n.bodies.source(blk.Header.ID())
+	if peer == nil {
+		return // on disk since before the start, or mined here (SubmitBlock announces its own)
+	}
+	if _, headerTip, _ := n.chain.Tip(); uint64(blk.Header.Height)+2 < headerTip {
+		return
+	}
+	except := addrOf(peer)
+	n.goTracked(func() { n.announceBlock(blk, except) })
 }
 
 // reconcileUTXOTip brings the UTXO set back onto the branch that is active according to the
@@ -567,12 +649,8 @@ func (n *Node) storeBody(peer *p2p.Peer, blk *chain.Block) error {
 	if err := n.store.PutBlock(blk); err != nil {
 		return err
 	}
-	// Hand a fresh body onward whole, so the next hop does not have to ask for it either.
-	// Only near the tip: during a sync this would push the whole history to every peer, and
-	// there the pull driver is the right tool.
-	if _, headerTip, _ := n.chain.Tip(); uint64(blk.Header.Height)+2 >= headerTip {
-		n.announceBlock(blk, addrOf(peer))
-	}
+	// Handing it onward waits for validation (relayApplied).
+	n.bodies.deliveredBy(id, peer)
 	return nil
 }
 

@@ -159,31 +159,40 @@ type PoWPair struct {
 
 func (p PoWPair) VerifyPoW(h *Header) (bool, error) { return h.CheckPoW(p.Hasher, p.Verifier) }
 
-// AddHeader verifies and files a header. It returns true if that moved the tip.
-func (hc *HeaderChain) AddHeader(h *Header, pow PoWChecker) (bool, error) {
+// CheckHeader runs every check that needs no PoW computation: the parent is known, the height follows
+// it, the branch is one the node would take, the time, the difficulty and the lane are right. It files
+// nothing.
+//
+// It is what a caller asks before it fetches the PoW verifier for the header's height. The verifier
+// belongs to an epoch and an epoch costs gigabytes to build, so it is built only for a header that got
+// this far — never for a height a peer merely wrote into a header.
+func (hc *HeaderChain) CheckHeader(h *Header) error {
 	hc.mu.Lock()
 	defer hc.mu.Unlock()
+	_, err := hc.checkLocked(h, h.ID())
+	return err
+}
 
-	id := h.ID()
+// checkLocked is the cheap part of AddHeader. It returns the parent.
+func (hc *HeaderChain) checkLocked(h *Header, id [32]byte) (*node, error) {
 	if _, dup := hc.byID[id]; dup {
-		return false, ErrDuplicate
+		return nil, ErrDuplicate
 	}
 	parent, ok := hc.byID[h.PrevBlock]
 	if !ok {
-		return false, ErrUnknownParent
+		return nil, ErrUnknownParent
 	}
 	if uint64(h.Height) != parent.height+1 {
-		return false, ErrBadHeight
+		return nil, ErrBadHeight
 	}
 
-	// --- the cheap checks ---
 	// A header from an invalid branch goes away right away: we paid for it once by downloading
 	// the body and validating it, we will not pay a second time.
 	if hc.invalid[id] || hc.hasInvalidAncestorLocked(parent, map[[32]byte]bool{}) {
-		return false, ErrInvalidAncestor
+		return nil, ErrInvalidAncestor
 	}
 	if cp, ok := hc.params.checkpointAt(uint64(h.Height)); ok && cp != id {
-		return false, fmt.Errorf("%w at height %d", ErrCheckpoint, h.Height)
+		return nil, fmt.Errorf("%w at height %d", ErrCheckpoint, h.Height)
 	}
 	// A side branch may fork at most ReorgLimit below the tip (and not below finality). The node
 	// would never accept a deeper one anyway — and storing it would let an attacker fill memory
@@ -191,32 +200,46 @@ func (hc *HeaderChain) AddHeader(h *Header, pow PoWChecker) (bool, error) {
 	if parent != hc.tip {
 		fork := hc.forkPointBoundedLocked(parent, ReorgLimit)
 		if fork == nil {
-			return false, ErrForkTooDeep
+			return nil, ErrForkTooDeep
 		}
 		if hc.finality != nil && hc.finality.CheckReorg(fork.height) != nil {
-			return false, ErrForkTooDeep
+			return nil, ErrForkTooDeep
 		}
 	}
 	mtp := hc.medianTimePastLocked(parent)
 	if h.Time <= mtp {
-		return false, ErrTimeTooOld
+		return nil, ErrTimeTooOld
 	}
 	if int64(h.Time) > hc.now().Add(MaxFutureDrift).Unix() {
-		return false, ErrTimeTooNew
+		return nil, ErrTimeTooNew
 	}
 	wantBits, err := hc.nextBitsLocked(parent, h.Lane)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	if h.Bits != wantBits {
-		return false, fmt.Errorf("%w: got %08x, expected %08x", ErrBadBits, h.Bits, wantBits)
+		return nil, fmt.Errorf("%w: got %08x, expected %08x", ErrBadBits, h.Bits, wantBits)
 	}
 	// Against the PARENT's time, not against the median time past: the MTP trails the tip by
 	// ~6 blocks, so the relief would apply even on a perfectly healthy chain and the rotation
 	// rule would do nothing.
 	if !LaneAllowedAt(hc.recentLanesLocked(parent, MaxSameLaneRun), h.Lane,
 		time.Unix(int64(h.Time), 0), time.Unix(int64(parent.header.Time), 0)) {
-		return false, ErrLaneNotAllowed
+		return nil, ErrLaneNotAllowed
+	}
+	return parent, nil
+}
+
+// AddHeader verifies and files a header. It returns true if that moved the tip.
+func (hc *HeaderChain) AddHeader(h *Header, pow PoWChecker) (bool, error) {
+	hc.mu.Lock()
+	defer hc.mu.Unlock()
+
+	// --- the cheap checks ---
+	id := h.ID()
+	parent, err := hc.checkLocked(h, id)
+	if err != nil {
+		return false, err
 	}
 
 	// --- the expensive check last ---

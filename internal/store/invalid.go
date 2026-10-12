@@ -28,6 +28,15 @@ func (s *Store) MarkInvalid(id [32]byte) error {
 	return batch.Commit(pebble.Sync)
 }
 
+// DropBody throws away a block's body and keeps the header. It is for a copy of the body that failed
+// validation through no fault of the block: the header stays where it is and the body is asked for again.
+func (s *Store) DropBody(id [32]byte) error {
+	if err := s.db.Delete(keyWithID(prefixBody, id), pebble.Sync); err != nil {
+		return fmt.Errorf("store: %w", err)
+	}
+	return nil
+}
+
 // IsInvalid says whether a block is marked invalid.
 func (s *Store) IsInvalid(id [32]byte) bool {
 	_, err := s.get(keyWithID(prefixInvalid, id))

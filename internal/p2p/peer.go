@@ -157,6 +157,10 @@ const (
 	MisbehaviorTooManyItems = 20  // a list over the cap
 	MisbehaviorBadHeader    = 50  // a header that failed validation
 	MisbehaviorInvalidBlock = 100 // a block violating consensus — an instant ban
+	// MisbehaviorBadCopy: a body that matches its header and fails validation on its witnesses. The
+	// header does not cover those, so the block may be fine and the copy tampered with on the way.
+	// Not an instant ban: a peer may have passed on what it was handed.
+	MisbehaviorBadCopy = 50
 	// MisbehaviorBadPoW is a header with invalid PoW that passed every cheap check.
 	// An instant ban: an honest peer cannot send it (it only forwards verified headers), and every
 	// such header costs us a RandomX computation or a walk through the DAG — otherwise an attacker

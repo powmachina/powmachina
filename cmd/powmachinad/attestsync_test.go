@@ -1,6 +1,9 @@
 package main
 
 import (
+	"encoding/binary"
+	"fmt"
+	"math"
 	"net"
 	"testing"
 	"time"
@@ -96,6 +99,33 @@ func TestGetAttestIsBounded(t *testing.T) {
 	list, err := p2p.DecodeAttestations(msg.Payload)
 	if err != nil || len(list) != 0 {
 		t.Fatalf("expected an empty list, got %d (%v)", len(list), err)
+	}
+
+	// A range that starts at the last possible height is answered at once. It used to send the node
+	// walking 2^64 heights with the finality lock held.
+	for _, req := range [][2]uint64{{math.MaxUint64, 1}, {math.MaxUint64, p2p.MaxAttestHeights}} {
+		raw := make([]byte, 10)
+		binary.LittleEndian.PutUint64(raw, req[0])
+		binary.LittleEndian.PutUint16(raw[8:], uint16(req[1]))
+		if err := conn.Send(&p2p.Message{Command: p2p.CmdGetAttest, Payload: raw}); err != nil {
+			t.Fatal(err)
+		}
+		answered := make(chan error, 1)
+		go func() {
+			msg, err := conn.Recv()
+			if err == nil && msg.Command != p2p.CmdAttestations {
+				err = fmt.Errorf("got %q", msg.Command)
+			}
+			answered <- err
+		}()
+		select {
+		case err := <-answered:
+			if err != nil {
+				t.Fatalf("getattest from %d, %d heights: %v", req[0], req[1], err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("getattest from %d, %d heights was never answered", req[0], req[1])
+		}
 	}
 
 	// A range above the cap has to be refused and the connection hung up — not obeyed.

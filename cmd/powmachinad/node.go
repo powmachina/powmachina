@@ -10,6 +10,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"log"
+	"math"
 	"net"
 	"powmachina/internal/store"
 	"powmachina/internal/stratum"
@@ -647,7 +648,16 @@ func (n *Node) handle(conn *p2p.Conn, peer *p2p.Peer, msg *p2p.Message) error {
 		if n.finality == nil {
 			return nil
 		}
-		list := n.finality.InRange(from, from+uint64(count)-1, p2p.MaxAttestPerMessage)
+		// `from` and `count` are the peer's: an empty range and one that runs past the last height
+		// are both answered with what there is, without the sum wrapping around.
+		var list []chain.Attestation
+		if count > 0 {
+			to := from + uint64(count) - 1
+			if to < from {
+				to = math.MaxUint64
+			}
+			list = n.finality.InRange(from, to, p2p.MaxAttestPerMessage)
+		}
 		payload, err := p2p.EncodeAttestations(list)
 		if err != nil {
 			return err
@@ -731,11 +741,18 @@ func (n *Node) handle(conn *p2p.Conn, peer *p2p.Peer, msg *p2p.Message) error {
 func (n *Node) acceptHeaders(peer *p2p.Peer, headers []*chain.Header) (int, error) {
 	added, tipMoved, invalidSeen := 0, false, 0
 	for _, h := range headers {
-		pow, err := n.pow(uint64(h.Height))
-		if err != nil {
-			return added, err
+		// The height in a header is whatever the peer wrote there. The epoch — a DAG of gigabytes
+		// and a RandomX cache — is built only once the header links to a block we know, at the
+		// height that follows it, and passes every other check that costs nothing.
+		changed := false
+		err := n.chain.CheckHeader(h)
+		if err == nil {
+			var pow chain.PoWChecker
+			if pow, err = n.pow(uint64(h.Height)); err != nil {
+				return added, err
+			}
+			changed, err = n.chain.AddHeader(h, pow)
 		}
-		changed, err := n.chain.AddHeader(h, pow)
 		switch {
 		case err == nil:
 			// The header is verified — store it. It reaches the height index only further

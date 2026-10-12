@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"sync"
 )
@@ -246,16 +247,26 @@ func (f *FinalityState) Update(tipHeight uint64, lookup ChainLookup) {
 	}
 }
 
-// InRange returns the attestations for heights `from` … `to` (inclusive), at most `max` of them.
-// It serves the answer to a peer that asks after a restart what it is missing.
+// InRange returns the attestations for heights `from` … `to` (inclusive), at most `max` of them, in
+// order of height. It serves the answer to a peer that asks after a restart what it is missing.
+//
+// The range comes off the wire, so the work must not depend on how wide it is: it walks the heights the
+// node holds attestations for, never the range itself.
 func (f *FinalityState) InRange(from, to uint64, max int) []Attestation {
 	if max <= 0 || to < from {
 		return nil
 	}
 	f.mu.RLock()
 	defer f.mu.RUnlock()
+	heights := make([]uint64, 0, len(f.byHeight))
+	for h := range f.byHeight {
+		if h >= from && h <= to {
+			heights = append(heights, h)
+		}
+	}
+	slices.Sort(heights)
 	out := make([]Attestation, 0, max)
-	for h := from; h <= to; h++ {
+	for _, h := range heights {
 		for _, a := range f.byHeight[h] {
 			if len(out) >= max {
 				return out

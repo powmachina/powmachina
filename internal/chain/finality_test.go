@@ -2,7 +2,10 @@ package chain
 
 import (
 	"crypto/ed25519"
+	"math"
+	"slices"
 	"testing"
+	"time"
 )
 
 type quorum struct {
@@ -197,4 +200,47 @@ func newQuorumForFuzz() *SignerSet {
 		set.Keys = append(set.Keys, pub)
 	}
 	return set
+}
+
+// The range of a getattest request is the peer's. A range that ends at the last possible height, or
+// covers every height there is, must cost no more than the attestations the node holds.
+func TestInRangeDoesNotWalkTheRange(t *testing.T) {
+	f := NewFinalityState(&SignerSet{Keys: RegTest.FinalitySigners, Threshold: 5})
+	for _, h := range []uint64{7, 5, 6} {
+		for s := range 2 {
+			if _, err := f.Add(Sign(RegtestSignerKey(s), uint8(s), h, [32]byte{byte(h)})); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	type span struct {
+		from, to uint64
+		want     []uint64
+	}
+	spans := []span{
+		{math.MaxUint64, math.MaxUint64, nil},
+		{0, math.MaxUint64, []uint64{5, 5, 6, 6, 7, 7}},
+		{6, math.MaxUint64, []uint64{6, 6, 7, 7}},
+		{6, 6, []uint64{6, 6}},
+		{8, 5, nil},
+	}
+	for _, sp := range spans {
+		done := make(chan []Attestation, 1)
+		go func() { done <- f.InRange(sp.from, sp.to, 640) }()
+		select {
+		case got := <-done:
+			var heights []uint64
+			for _, a := range got {
+				heights = append(heights, a.Height)
+			}
+			if !slices.Equal(heights, sp.want) {
+				t.Fatalf("InRange(%d, %d) gave heights %v, want %v", sp.from, sp.to, heights, sp.want)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("InRange(%d, %d) is still walking", sp.from, sp.to)
+		}
+	}
+	if got := f.InRange(0, math.MaxUint64, 3); len(got) != 3 {
+		t.Fatalf("the cap of 3 gave %d", len(got))
+	}
 }
