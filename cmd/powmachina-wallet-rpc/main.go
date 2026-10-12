@@ -64,6 +64,8 @@ func main() {
 		log.Fatal("missing POWM_WALLET_RPC_TOKEN — without a token wallet-rpc would sign a withdrawal for anybody who reaches the port")
 	}
 	node := nodeclient.New(walletcmd.DaemonAddress(params, *daemon), os.Getenv("POWM_RPC_TOKEN"))
+	// A node on another network is refused at every sync: its blocks would be scanned as this network's.
+	node.ExpectNetwork(params.Name)
 	srv := walletrpc.New(node, node, token)
 	srv.FeePerKB = *feeRate
 	srv.RequirePassphrase = !*noPass

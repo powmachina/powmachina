@@ -151,7 +151,7 @@ func TestBalanceAndExactAmounts(t *testing.T) {
 
 func TestErrorCodes(t *testing.T) {
 	e := setup(t)
-	if r := e.call("sendtoaddress", "powm1nieco", 1); r.Error == nil || r.Error.Code != codeInvalidAddress {
+	if r := e.call("sendtoaddress", "powm1something", 1); r.Error == nil || r.Error.Code != codeInvalidAddress {
 		t.Fatalf("a bad address: %+v", r.Error)
 	}
 	to, _ := e.w.NewAddress("")

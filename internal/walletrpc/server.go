@@ -8,6 +8,9 @@
 //     The input may be a number or a string; an exponent (1e-8) is refused.
 //   - The chain's read methods (getblockcount, getblock, getrawtransaction, sendrawtransaction…) are
 //     forwarded to the node. An adapter therefore has one endpoint, as with bitcoind.
+//   - sendtoaddress and sendmany record the payment before handing it to the node. An error from them
+//     means nothing was sent and the call may be repeated. When the node does not answer at all they
+//     return the transaction's ID all the same: the payment is pending and the wallet keeps sending it.
 //   - The wallet is unlocked from startup (the password from the environment); walletpassphrase is not needed.
 package walletrpc
 
@@ -19,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"sort"
 	"strings"
@@ -97,6 +101,62 @@ type walletState struct {
 	// walletpassphrase calls (an adapter makes one on every withdrawal) therefore do not cost a second.
 	passHash  [32]byte
 	passKnown bool
+	// The limit on wrong passwords (tryPassword): how many in a row, and until when none is looked at.
+	// It lives in memory only — a restart clears it, and costs whoever is guessing the restart.
+	checkMu sync.Mutex
+	fails   int
+	blocked time.Time
+}
+
+// now is the clock of the password limit; the tests move it.
+var now = time.Now
+
+const (
+	// freePassAttempts wrong passwords in a row cost nothing: a person mistypes, an adapter is started
+	// with yesterday's password. From the next one on, every failure doubles the wait, up to maxPassDelay.
+	freePassAttempts = 3
+	maxPassDelay     = time.Minute
+)
+
+// passDelay is the wait after the `fails`-th wrong password in a row.
+func passDelay(fails int) time.Duration {
+	if fails < freePassAttempts {
+		return 0
+	}
+	if shift := fails - freePassAttempts; shift < 6 {
+		return time.Second << shift
+	}
+	return maxPassDelay
+}
+
+// tryPassword runs one password check under the wallet's limit on wrong attempts.
+//
+// Without it the RPC token would be all it takes to search for the password: the token is what an
+// attacker is assumed to have, and the password is what is supposed to stand between them and the
+// coins. While the wait runs, no password is looked at — not even the right one, otherwise the wait
+// would cost a guesser nothing. Checks also go one at a time, so parallel guesses cannot each make the
+// key derivation allocate its memory at once.
+func (st *walletState) tryPassword(check func() bool) (bool, error) {
+	st.checkMu.Lock()
+	defer st.checkMu.Unlock()
+	st.mu.Lock()
+	wait := st.blocked.Sub(now())
+	st.mu.Unlock()
+	if wait > 0 {
+		return false, &rpcError{codeWalletError, fmt.Sprintf(
+			"Error: Too many incorrect wallet passphrases. The next attempt is possible in %d s.",
+			int64((wait+time.Second-1)/time.Second))}
+	}
+	ok := check()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if ok {
+		st.fails, st.blocked = 0, time.Time{}
+		return true, nil
+	}
+	st.fails++
+	st.blocked = now().Add(passDelay(st.fails))
+	return false, nil
 }
 
 func (st *walletState) unlockedUntil() int64 {
@@ -671,6 +731,14 @@ func (s *walletCtx) send(pays []wallet.Payment) (any, error) {
 	s.st.sendMu.Lock()
 	defer s.st.sendMu.Unlock()
 	tx, _, err := s.w.Send(s.node, pays, s.FeePerKB)
+	if errors.Is(err, wallet.ErrBroadcastUnknown) {
+		// The answer is the transaction's ID, not an error. An error would tell the caller the payment
+		// failed, it would repeat it, and the wallet would pay a second time from other coins — while
+		// this transaction is recorded, its coins are reserved and it is sent again until it confirms.
+		id := tx.TxID()
+		log.Printf("%s: payment %x: %v", s.name, id, err)
+		return hex.EncodeToString(id[:]), nil
+	}
 	if err != nil {
 		return nil, err
 	}

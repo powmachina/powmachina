@@ -17,8 +17,23 @@ type Node interface {
 	Blocks(from uint64, count int) ([]*chain.Block, error)
 	// Mempool returns the IDs of the transactions the node holds.
 	Mempool() ([][32]byte, error)
-	// Broadcast sends a transaction to the network.
+	// Broadcast sends a transaction to the network. The kind of failure matters, because the wallet does
+	// opposite things with the two: an error for which Rejected is true says the node does not hold the
+	// transaction; any other error leaves open whether it does.
 	Broadcast(tx *chain.Tx) error
+}
+
+// ErrBroadcastUnknown: the transaction is signed and recorded, but the node did not answer whether it
+// took it (a timeout, a dropped connection). It may well be on its way, so the wallet keeps it as
+// pending and sends it again — the caller has to treat the payment as made, not as failed.
+var ErrBroadcastUnknown = errors.New("wallet: the node did not confirm taking the transaction — it stays pending and is sent again")
+
+// Rejected reports whether a Broadcast error is a plain "no": the node answered that it does not take the
+// transaction, or the request never left this machine. Only then is it safe to free the coins. Everything
+// else — a lost reply above all — may hide a transaction that is already spreading through the network.
+func Rejected(err error) bool {
+	var r interface{ Rejected() bool }
+	return errors.As(err, &r) && r.Rejected()
 }
 
 // SyncBatch is the number of blocks per request.
@@ -378,10 +393,16 @@ func (w *Wallet) pendingSpenderLocked(op chain.Outpoint) [32]byte {
 }
 
 // PendingGrace: an unconfirmed transaction the node does not have in its mempool is sent again first
-// (the node may have restarted). If the node refuses it, the wallet drops it and frees the coins.
+// (the node may have restarted, or the first attempt never got an answer). If the node refuses it for
+// good, the wallet drops it and frees the coins.
 var PendingGrace = 2 * time.Minute
 
 // pending checks our unconfirmed transactions against the node's mempool.
+//
+// Dropping one is the dangerous half: a transaction the wallet forgets while it is still alive somewhere
+// frees coins that are about to be spent, and its ID stops answering in gettransaction — which a caller
+// reads as "the payment failed". So a transaction is dropped only when the node refuses it for a reason
+// that lies in the transaction itself, and the wallet has seen every block the node has.
 func (w *Wallet) pending(node Node) error {
 	w.mu.Lock()
 	var waiting []*Tx
@@ -390,6 +411,7 @@ func (w *Wallet) pending(node Node) error {
 			waiting = append(waiting, t)
 		}
 	}
+	scanned := w.tip
 	w.mu.Unlock()
 	if len(waiting) == 0 {
 		return nil
@@ -402,21 +424,92 @@ func (w *Wallet) pending(node Node) error {
 	for _, id := range ids {
 		inPool[id] = true
 	}
-	for _, t := range waiting {
+	// held: the ones the node has not taken in this round and the wallet keeps anyway. What spends
+	// their outputs is not even offered — the node would refuse it for the missing parent alone.
+	held := make(map[[32]byte]bool)
+	for _, t := range parentsFirst(waiting) {
 		if inPool[t.ID] {
+			continue
+		}
+		w.mu.Lock()
+		cur, known := w.txs[t.ID]
+		live := known && cur.Height == 0
+		w.mu.Unlock()
+		if !live {
+			continue // dropped a moment ago together with its parent
+		}
+		orphan := false
+		for _, in := range t.Inputs {
+			orphan = orphan || held[in.TxID]
+		}
+		if orphan {
+			held[t.ID] = true
 			continue
 		}
 		tx, _, err := chain.DeserializeTx(t.Raw)
 		if err == nil {
-			err = node.Broadcast(tx)
+			if err = node.Broadcast(tx); err == nil {
+				continue
+			}
+			if !w.refusedForGood(node, err, scanned) {
+				held[t.ID] = true
+				continue
+			}
 		}
-		if err != nil {
-			w.mu.Lock()
-			w.abandonLocked(t.ID)
-			w.mu.Unlock()
-		}
+		w.mu.Lock()
+		w.abandonLocked(t.ID)
+		w.mu.Unlock()
 	}
 	return nil
+}
+
+// refusedForGood says whether a failed rebroadcast means the transaction is dead.
+//
+// Not when the node gave no answer, and not when it only has no room right now. And not when the node
+// has a block the wallet has not scanned yet: the transaction may be in that very block, and "the inputs
+// are already spent" is then the node's way of saying it was mined. The next sync reads the block and
+// either confirms the transaction or asks again.
+func (w *Wallet) refusedForGood(node Node, err error, scanned [32]byte) bool {
+	if !Rejected(err) || temporary(err) {
+		return false
+	}
+	_, tip, err := node.Tip()
+	return err == nil && tip == scanned
+}
+
+// temporary reports whether a rejection is about the node's state right now (a full mempool, a chain of
+// unconfirmed transactions at its limit) rather than about the transaction.
+func temporary(err error) bool {
+	var t interface{ Temporary() bool }
+	return errors.As(err, &t) && t.Temporary()
+}
+
+// parentsFirst orders unconfirmed transactions so that none comes before one whose output it spends.
+// A node that lost its mempool has to get them in that order: a child offered first is refused for
+// inputs the node has not seen yet.
+func parentsFirst(txs []*Tx) []*Tx {
+	left := make(map[[32]byte]*Tx, len(txs))
+	for _, t := range txs {
+		left[t.ID] = t
+	}
+	out := make([]*Tx, 0, len(txs))
+	var place func(t *Tx)
+	place = func(t *Tx) {
+		if _, todo := left[t.ID]; !todo {
+			return
+		}
+		delete(left, t.ID) // before the parents: a cycle cannot exist, but it must not hang either
+		for _, in := range t.Inputs {
+			if parent, ok := left[in.TxID]; ok {
+				place(parent)
+			}
+		}
+		out = append(out, t)
+	}
+	for _, t := range txs {
+		place(t)
+	}
+	return out
 }
 
 // abandonLocked drops our unconfirmed transaction, frees its coins and also drops our transactions that

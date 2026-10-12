@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"log"
 	"sort"
 	"strings"
 	"time"
@@ -168,8 +169,9 @@ func (s *Server) sendRaw(ctx *walletCtx, a args) (any, error) {
 	if len(tx.Witness) != len(tx.Inputs) {
 		return nil, &rpcError{codeVerifyRejected, "transaction is not signed"}
 	}
-	if err := s.node.Broadcast(tx); err != nil {
-		return nil, &rpcError{codeVerifyRejected, err.Error()}
+	sendErr := s.node.Broadcast(tx)
+	if sendErr != nil && wallet.Rejected(sendErr) {
+		return nil, &rpcError{codeVerifyRejected, sendErr.Error()}
 	}
 	// The transaction is recorded by the wallet it belongs to. The list is a copy — wallets may be added
 	// or removed in the meantime (a GUI with `-allow-manage`).
@@ -177,13 +179,25 @@ func (s *Server) sendRaw(ctx *walletCtx, a args) (any, error) {
 	if ctx != nil {
 		targets = append([]string{ctx.name}, targets...)
 	}
+	recorded := false
 	for _, name := range targets {
 		l, _, ok := s.lookup(name)
 		if ok && l.w.Commit(tx) == nil {
+			recorded = true
 			break
 		}
 	}
 	id := tx.TxID()
+	if sendErr != nil {
+		// The node did not answer, so the transaction may or may not be on its way. A wallet that owns
+		// it keeps it reserved and sends it again, which makes the ID the honest answer: an error would
+		// have the caller fund a second transaction from the coins of the first. With no wallet behind
+		// it nothing would ever send it again, and the error is all there is to say.
+		if !recorded {
+			return nil, &rpcError{codeVerifyRejected, sendErr.Error()}
+		}
+		log.Printf("sendrawtransaction %x: %v: %v", id, wallet.ErrBroadcastUnknown, sendErr)
+	}
 	return hex.EncodeToString(id[:]), nil
 }
 
@@ -335,7 +349,11 @@ func (s *walletCtx) walletPassphrase(a args) (any, error) {
 	if timeout == 0 || timeout > 100_000_000 {
 		return nil, &rpcError{codeInvalidParam, "timeout must be 1–100000000 seconds"}
 	}
-	if !s.checkPass(pass) {
+	ok, err := s.st.tryPassword(func() bool { return s.checkPass(pass) })
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
 		return nil, &rpcError{codeWrongPassphrase, "Error: The wallet passphrase entered was incorrect."}
 	}
 	s.st.mu.Lock()
@@ -370,11 +388,20 @@ func (s *walletCtx) passphraseChange(a args) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := s.w.ChangePassword(old, nw); err != nil {
-		if errors.Is(err, wallet.ErrWrongPassword) {
-			return nil, &rpcError{codeWrongPassphrase, "Error: The wallet passphrase entered was incorrect."}
-		}
+	// The old password is a guess like any other, so it counts against the same limit.
+	var changeErr error
+	ok, err := s.st.tryPassword(func() bool {
+		changeErr = s.w.ChangePassword(old, nw)
+		return !errors.Is(changeErr, wallet.ErrWrongPassword)
+	})
+	if err != nil {
 		return nil, err
+	}
+	if !ok {
+		return nil, &rpcError{codeWrongPassphrase, "Error: The wallet passphrase entered was incorrect."}
+	}
+	if changeErr != nil {
+		return nil, changeErr
 	}
 	s.st.mu.Lock()
 	s.st.passKnown = false

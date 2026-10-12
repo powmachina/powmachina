@@ -1,6 +1,7 @@
 package wallet
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -15,8 +16,9 @@ type Payment struct {
 	Amount int64
 }
 
-// Build assembles and signs a transaction. It does not reserve the coins yet — Commit does that after
-// the node accepts the transaction (otherwise a refused transaction would block the coins).
+// Build assembles and signs a transaction without recording it: the coins stay free until Submit (or
+// Commit) is called with it. It is for showing a person the fee before they agree; a payment nobody has
+// to confirm goes through Send, which selects the coins and reserves them in one step.
 //
 // Input selection: confirmed first, largest first. It is optimal neither for privacy nor for the size
 // of the UTXO set, but it is predictable — and with money predictability beats elegance.
@@ -54,10 +56,12 @@ func paymentOutputs(pays []Payment) ([]chain.TxOut, error) {
 	return outs, nil
 }
 
-// isChangeLocked: an output is change when it goes to the change branch, or — in a transaction that
-// spends our coins — to the configured fixed change address.
+// isChangeLocked: an output is change when the transaction spends our coins and the output goes to the
+// change branch or to the configured fixed change address. In a transaction of somebody else an output
+// to the very same address is a payment like any other — hiding it from the history would leave a
+// balance that grew without an entry saying why.
 func (w *Wallet) isChangeLocked(ref keyRef, pub [32]byte, ours bool) bool {
-	return ref.kind == branchChange || (ours && w.changeTo != nil && pub == *w.changeTo)
+	return ours && (ref.kind == branchChange || (w.changeTo != nil && pub == *w.changeTo))
 }
 
 // SetChangeAddress sets a fixed address for change (the counterpart of HOT_MAIN_WALLET). Empty = every
@@ -258,8 +262,8 @@ func (w *Wallet) SignRaw(tx *chain.Tx) (*chain.Tx, []string, error) {
 const SweepMaxInputs = 500
 
 // Sweep sends every confirmed coin (≥ minConf) to `to`, at most `maxInputs` in one transaction, with the
-// fee deducted from the output. It broadcasts and records every transaction; on an error it returns the
-// ones that already went out.
+// fee deducted from the output. It records and broadcasts every transaction; on an error it returns the
+// ones that already went out — including, with ErrBroadcastUnknown, the one the node did not answer for.
 func (w *Wallet) Sweep(node Node, to [32]byte, minConf uint64, maxInputs int, feePerKB int64) ([]*chain.Tx, error) {
 	if maxInputs <= 0 || maxInputs > SweepMaxInputs {
 		maxInputs = SweepMaxInputs
@@ -273,19 +277,31 @@ func (w *Wallet) Sweep(node Node, to [32]byte, minConf uint64, maxInputs int, fe
 		if err != nil || tx == nil {
 			return sent, err
 		}
-		if err := node.Broadcast(tx); err != nil {
-			return sent, err
-		}
-		if err := w.Commit(tx); err != nil {
+		if err := w.announce(node, tx, true); err != nil {
+			if errors.Is(err, ErrBroadcastUnknown) {
+				sent = append(sent, tx) // recorded and possibly on its way: it counts as sent
+			}
 			return sent, err
 		}
 		sent = append(sent, tx)
 	}
 }
 
+// sweepChunk builds one sweeping transaction and records it, under one hold of the lock.
 func (w *Wallet) sweepChunk(to [32]byte, minConf uint64, maxInputs int, feePerKB int64) (*chain.Tx, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	tx, err := w.sweepChunkLocked(to, minConf, maxInputs, feePerKB)
+	if err != nil || tx == nil {
+		return nil, err
+	}
+	if _, err := w.recordLocked(tx); err != nil {
+		return nil, err
+	}
+	return tx, nil
+}
+
+func (w *Wallet) sweepChunkLocked(to [32]byte, minConf uint64, maxInputs int, feePerKB int64) (*chain.Tx, error) {
 	var picked []*Coin
 	var sum int64
 	for _, c := range w.spendableLocked() {
@@ -383,14 +399,21 @@ func (w *Wallet) PlanSweep(minConf uint64, maxInputs int, feePerKB int64) (Sweep
 	return plan, chunk()
 }
 
-// Commit records a sent transaction: its inputs are reserved until a block confirms it, and the change
-// address is marked as used.
+// Commit records a transaction that has already been handed to the node: its inputs are reserved until a
+// block confirms it, and the change address is marked as used.
 func (w *Wallet) Commit(tx *chain.Tx) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	_, err := w.commitLocked(tx)
+	return err
+}
+
+// commitLocked is Commit for a caller that holds the lock. `fresh` says whether the wallet learned of the
+// transaction just now (false = it was recorded before, for instance the same raw transaction sent twice).
+func (w *Wallet) commitLocked(tx *chain.Tx) (fresh bool, err error) {
 	txid := tx.TxID()
 	if _, known := w.txs[txid]; known {
-		return nil // already recorded (for instance sendrawtransaction of the same transaction again)
+		return false, nil
 	}
 	var spent, outSum int64
 	var inputs []chain.Outpoint
@@ -398,7 +421,7 @@ func (w *Wallet) Commit(tx *chain.Tx) error {
 		op := chain.Outpoint{TxID: in.PrevTxID, Index: in.PrevIndex}
 		c, ok := w.coins[op]
 		if !ok || c.spent() {
-			return fmt.Errorf("wallet: transaction spends a coin the wallet does not have")
+			return false, fmt.Errorf("wallet: transaction spends a coin the wallet does not have")
 		}
 		inputs = append(inputs, op)
 		spent += c.Value
@@ -411,7 +434,9 @@ func (w *Wallet) Commit(tx *chain.Tx) error {
 	for i, o := range tx.Outputs {
 		outSum += o.Value
 		out := Output{Index: uint32(i), Value: o.Value}
-		if len(o.Script) == chain.PubkeyBytes {
+		// The same test the block scan applies: 32 bytes under another script version are not a key,
+		// and a coin recorded for them would be one the wallet can never spend.
+		if o.ScriptVersion == chain.ScriptVersionBasic && len(o.Script) == chain.PubkeyBytes {
 			pub := a32(o.Script)
 			out.Address = w.encode(pub)
 			if ref, ok := w.keys.derived[pub]; ok {
@@ -428,19 +453,100 @@ func (w *Wallet) Commit(tx *chain.Tx) error {
 	}
 	w.txs[txid] = &Tx{ID: txid, Time: time.Now().Unix(), Received: received, Spent: spent,
 		Fee: spent - outSum, Outputs: outs, Raw: tx.Serialize(), Inputs: inputs}
-	return w.saveLocked()
+	return true, w.saveLocked()
 }
 
-// Send = Build + sending through the node + Commit.
+// recordLocked records a transaction that has NOT been handed to the node yet. The order is the point:
+// the record is on disk before the first byte leaves, so no outcome of the broadcast — an answer, a lost
+// answer, a crash in between — can leave a transaction in the network that the wallet does not know
+// about and would pay a second time with other coins.
+//
+// Since nothing has left yet, a failure here is still harmless and is undone completely.
+func (w *Wallet) recordLocked(tx *chain.Tx) (fresh bool, err error) {
+	txid := tx.TxID()
+	for _, in := range tx.Inputs {
+		c, ok := w.coins[chain.Outpoint{TxID: in.PrevTxID, Index: in.PrevIndex}]
+		if ok && !c.spent() && c.pending() && c.PendingBy != txid {
+			return false, fmt.Errorf("%w: input %x:%d is already spent by a pending transaction",
+				ErrNoFunds, in.PrevTxID[:8], in.PrevIndex)
+		}
+	}
+	fresh, err = w.commitLocked(tx)
+	if err != nil && fresh {
+		w.abandonLocked(txid)
+	}
+	return fresh, err
+}
+
+// announce hands a recorded transaction to the node and settles the record by the answer:
+//   - taken: nothing more to do;
+//   - rejected: nobody has the transaction, so a record made for this attempt (`fresh`) is dropped and
+//     its coins are free again;
+//   - anything else: the outcome is unknown. The record stays, the coins stay reserved and Sync sends
+//     the transaction again until a block confirms it. The caller gets ErrBroadcastUnknown together with
+//     a transaction that is valid and may already be on its way.
+func (w *Wallet) announce(node Node, tx *chain.Tx, fresh bool) error {
+	err := node.Broadcast(tx)
+	if err == nil {
+		return nil
+	}
+	if !Rejected(err) {
+		return fmt.Errorf("%w (%w)", ErrBroadcastUnknown, err)
+	}
+	if fresh {
+		w.mu.Lock()
+		w.abandonLocked(tx.TxID())
+		// A failed save is not worth hiding the node's answer behind: the stale record on disk is only
+		// an unconfirmed transaction the node refuses again after the next start.
+		_ = w.saveLocked()
+		w.mu.Unlock()
+	}
+	return err
+}
+
+// Submit records a transaction made by Build and then broadcasts it — in that order, see recordLocked.
+// With ErrBroadcastUnknown the payment counts as made.
+func (w *Wallet) Submit(node Node, tx *chain.Tx) error {
+	w.mu.Lock()
+	fresh, err := w.recordLocked(tx)
+	w.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	return w.announce(node, tx, fresh)
+}
+
+// Send pays: it selects the coins, signs, records the transaction and only then broadcasts it. Selecting
+// and recording happen under one hold of the lock, so nothing can take the coins in between.
+//
+// With ErrBroadcastUnknown the transaction is returned as well: the payment counts as made. Repeating
+// the call would build a second transaction from other coins and pay twice.
 func (w *Wallet) Send(node Node, pays []Payment, feePerKB int64) (*chain.Tx, int64, error) {
-	tx, fee, err := w.Build(pays, feePerKB)
+	outs, err := paymentOutputs(pays)
 	if err != nil {
 		return nil, 0, err
 	}
-	if err := node.Broadcast(tx); err != nil {
+	w.mu.Lock()
+	change, err := w.changeKeyLocked(nil)
+	var tx *chain.Tx
+	var fee int64
+	if err == nil {
+		tx, _, fee, _, err = w.assembleLocked(outs, nil, true, change, feePerKB)
+	}
+	if err == nil {
+		_, err = w.recordLocked(tx)
+	}
+	w.mu.Unlock()
+	if err != nil {
 		return nil, 0, err
 	}
-	return tx, fee, w.Commit(tx)
+	if err := w.announce(node, tx, true); err != nil {
+		if errors.Is(err, ErrBroadcastUnknown) {
+			return tx, fee, err
+		}
+		return nil, 0, err
+	}
+	return tx, fee, nil
 }
 
 // spendableLocked: unspent, unreserved, matured coins including our own unconfirmed change. Confirmed

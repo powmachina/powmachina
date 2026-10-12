@@ -202,7 +202,12 @@ func (s *Server) getSeed(a args) (any, error) {
 	if pass == "" {
 		return nil, &rpcError{codeInvalidParam, "getseed requires the wallet's password"}
 	}
-	if !l.w.CheckPassword(pass) {
+	// The same limit on wrong attempts as walletpassphrase: it is the same password.
+	right, err := l.st.tryPassword(func() bool { return l.w.CheckPassword(pass) })
+	if err != nil {
+		return nil, err
+	}
+	if !right {
 		return nil, &rpcError{codeWrongPassphrase, "Error: The wallet passphrase entered was incorrect."}
 	}
 	addrs := l.w.Addresses()

@@ -13,7 +13,22 @@ type Node struct {
 	Chain  []*chain.Block
 	Pool   map[[32]byte]*chain.Tx
 	Reject bool // Broadcast fails (the inputs are already spent elsewhere)
+	Busy   bool // Broadcast fails for now (the mempool is full)
+	// LoseReply: Broadcast takes the transaction and then fails the way a lost answer does.
+	LoseReply bool
+	// Silent: Broadcast fails the way a timeout does, and the transaction never arrived.
+	Silent bool
 }
+
+// refusal is the node's own "no", as opposed to an answer that never came.
+type refusal struct {
+	msg       string
+	temporary bool
+}
+
+func (r *refusal) Error() string   { return r.msg }
+func (r *refusal) Rejected() bool  { return true }
+func (r *refusal) Temporary() bool { return r.temporary }
 
 // NewNode creates a chain with a genesis block.
 func NewNode() *Node {
@@ -72,9 +87,17 @@ func (n *Node) Mempool() ([][32]byte, error) {
 }
 
 func (n *Node) Broadcast(tx *chain.Tx) error {
-	if n.Reject {
-		return errors.New("the input is already spent by another transaction")
+	switch {
+	case n.Reject:
+		return &refusal{msg: "the input is already spent by another transaction"}
+	case n.Busy:
+		return &refusal{msg: "the mempool is full", temporary: true}
+	case n.Silent:
+		return errors.New("timeout awaiting response")
 	}
 	n.Pool[tx.TxID()] = tx
+	if n.LoseReply {
+		return errors.New("timeout awaiting response")
+	}
 	return nil
 }

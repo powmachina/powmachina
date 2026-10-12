@@ -55,6 +55,9 @@ func main() {
 	}
 	c := &cli{params: params, node: nodeclient.New(walletcmd.DaemonAddress(params, *daemon), os.Getenv("POWM_RPC_TOKEN"))}
 
+	// A node on another network is refused at every refresh: its blocks would be scanned as this network's.
+	c.node.ExpectNetwork(params.Name)
+
 	fmt.Printf("PowMachina wallet (%s)\n", params.Name)
 	switch {
 	case *gen != "":
@@ -433,13 +436,19 @@ func (c *cli) transfer(args []string) error {
 		fmt.Println("Transaction cancelled.")
 		return nil
 	}
-	if err := c.node.Broadcast(tx); err != nil {
-		return err
-	}
-	if err := c.w.Commit(tx); err != nil {
-		return err
-	}
 	id := tx.TxID()
+	err = c.w.Submit(c.node, tx)
+	if errors.Is(err, wallet.ErrBroadcastUnknown) {
+		// Not a failure: the wallet holds the transaction and keeps sending it. Saying "error" here would
+		// invite the person to send the same payment a second time.
+		fmt.Printf("The node did not confirm receiving the transaction (%v).\n"+
+			"It is saved in the wallet and will be sent again — do NOT repeat the transfer. Transaction %s\n",
+			err, hex.EncodeToString(id[:]))
+		return nil
+	}
+	if err != nil {
+		return err
+	}
 	fmt.Printf("Transaction successfully submitted, transaction %s\n", hex.EncodeToString(id[:]))
 	return nil
 }
