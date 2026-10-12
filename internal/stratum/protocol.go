@@ -133,6 +133,11 @@ func JobFrom(p *JobParams) (*work.Job, error) {
 	if !ok {
 		return nil, fmt.Errorf("stratum: unknown lane %q", p.Lane)
 	}
+	// The epoch decides what the miner builds before it hashes anything: the dataset for the card,
+	// RandomX for the CPU. It is the server's word, so it is checked before anything is built for it.
+	if !mh.ValidEpoch(p.Epoch) {
+		return nil, fmt.Errorf("stratum: epoch %d is past the last one a chain can reach", p.Epoch)
+	}
 	j := &work.Job{ID: p.JobID, Lane: lane, Height: p.Height, Epoch: p.Epoch}
 	h, err := hex.DecodeString(p.Header)
 	if err != nil || len(h) != mh.HeaderBytes {

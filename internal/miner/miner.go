@@ -404,6 +404,12 @@ func (m *Miner) setJob(id mh.Lane, j *work.Job) {
 		l.job.Store(nil)
 		return
 	}
+	// The epoch comes with the job, from whoever sent it, and everything below is built for it.
+	if !mh.ValidEpoch(j.Epoch) {
+		m.opt.Log.Printf("lane %s: a job for epoch %d, which no chain can reach — ignored", id, j.Epoch)
+		l.job.Store(nil)
+		return
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	t := newTask(j)
@@ -568,6 +574,11 @@ func (m *Miner) stopGPUs() {
 	m.gpuStop = nil
 }
 
+// gpuEpochRetry is how long a card waits before it tries again an epoch it could not be set up for.
+// A card that was short of memory for a moment comes back by itself; one that computes wrong hashes
+// fails the check again and stays idle.
+var gpuEpochRetry = time.Minute
+
 // gpuWork serves one card: on a new epoch it builds the dataset and verifies the card against
 // internal/mh, on a new job it uploads the header and searches. The cards split the nonces by their top bits.
 func (m *Miner) gpuWork(idx int, g GPU) {
@@ -577,6 +588,9 @@ func (m *Miner) gpuWork(idx int, g GPU) {
 	var cur *task
 	var curTighten uint32
 	var nonce uint64
+	// failed is the epoch the card could not be set up for, and failedAt when.
+	var failed *epochData
+	var failedAt time.Time
 	for {
 		select {
 		case <-m.gpuStop:
@@ -589,15 +603,26 @@ func (m *Miner) gpuWork(idx int, g GPU) {
 			continue
 		}
 		if t.epoch != epoch {
+			if t.epoch == failed && time.Since(failedAt) < gpuEpochRetry {
+				time.Sleep(50 * time.Millisecond)
+				continue
+			}
 			start := time.Now()
-			if err := g.SetEpoch(t.epoch.cache, t.epoch.items, t.epoch.ops); err != nil {
-				m.opt.Log.Printf("GPU %d: %v — GPU disabled", idx, err)
-				return
+			err := g.SetEpoch(t.epoch.cache, t.epoch.items, t.epoch.ops)
+			if err == nil {
+				err = verifyGPU(g, t.job, t.epoch.verify)
 			}
-			if err := verifyGPU(g, t.job, t.epoch.verify); err != nil {
-				m.opt.Log.Printf("GPU %d: %v — GPU disabled", idx, err)
-				return
+			if err != nil {
+				// The card sits this epoch out, it is not given up on. The epoch comes with the job:
+				// one job for an epoch whose dataset does not fit the card would otherwise switch the
+				// card off until the miner is restarted, with the CPU mining on as if all were well.
+				// Whatever the card has loaded now is not known to be right, so it starts over.
+				m.opt.Log.Printf("GPU %d: %v — the card does not mine epoch %d; it tries again with another epoch or in %v",
+					idx, err, t.epoch.epoch, gpuEpochRetry)
+				failed, failedAt, epoch, cur = t.epoch, time.Now(), nil, nil
+				continue
 			}
+			failed = nil
 			tpb, blocks, pt := g.Config()
 			m.opt.Log.Printf("GPU %d: epoch %d DAG built and verified against the reference in %v (grid %d×%d, %d per thread)",
 				idx, t.epoch.epoch, time.Since(start).Round(time.Millisecond), blocks, tpb, pt)

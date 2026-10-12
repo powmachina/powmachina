@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"powmachina/internal/chain"
@@ -52,6 +53,11 @@ func Build(t *Template, payout []byte, params chain.NetParams) (*Job, error) {
 	// retarget); 10 s of margin for a clock difference.
 	if limit := time.Now().Add(chain.MaxFutureDrift - 10*time.Second).Unix(); int64(t.MinTime) > limit {
 		return nil, ErrChainAhead
+	}
+	// A header carries its height in 32 bits. A template past that cannot become a block, and its
+	// epoch is not one anything can be built for.
+	if t.Height > math.MaxUint32 {
+		return nil, fmt.Errorf("work: template height %d does not fit a header", t.Height)
 	}
 	bits, err := ParseBits(t.Bits)
 	if err != nil {

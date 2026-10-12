@@ -81,3 +81,14 @@ func dagBytesForEpoch(epoch uint64) int {
 // EpochForHeight returns the epoch for a given block height. It applies to both lane G's DAG and lane
 // C's RandomX key.
 func EpochForHeight(height uint64) uint64 { return height / EpochBlocks }
+
+// MaxEpoch is the last epoch a chain can reach: a header carries its height in 32 bits.
+//
+// An epoch number also arrives from outside — in a job from a pool, as an argument of the shared
+// library — and the sizes above are defined only for epochs that can exist: far enough past this
+// bound the arithmetic wraps, down to a dataset of no items at all. Whoever takes an epoch from
+// outside checks it against this before building anything for it.
+const MaxEpoch uint64 = (1<<32 - 1) / EpochBlocks
+
+// ValidEpoch says whether an epoch is one a chain can reach.
+func ValidEpoch(epoch uint64) bool { return epoch <= MaxEpoch }

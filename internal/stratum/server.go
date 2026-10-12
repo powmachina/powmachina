@@ -206,12 +206,24 @@ var two256 = new(big.Int).Lsh(big.NewInt(1), 256)
 
 type laneState struct {
 	target *big.Int // the share target (larger = easier)
-	jobs   []*work.Job
+	jobs   []*issued
 	shares int
 	since  time.Time
 	work   *big.Int // the sum of the expected hashes from the accepted shares (a hashrate estimate)
 	workAt time.Time
 	paused bool
+}
+
+// issued is a job a connection was given, with the nonces the connection has sent for it.
+//
+// The nonces live exactly as long as the job: while the job can be submitted to, every share sent
+// for it is remembered, and once the job is dropped a share for it is stale whatever its nonce. So
+// there is no moment at which a share already counted can be counted again. The set needs no cap of
+// its own — a nonce is recorded only after the pace limit let the share through, and a job is
+// replaced within minutes.
+type issued struct {
+	*work.Job
+	seen map[uint64]struct{}
 }
 
 type sconn struct {
@@ -229,7 +241,6 @@ type sconn struct {
 	agent    string
 	since    time.Time
 	lanes    map[mh.Lane]*laneState
-	seen     map[string]bool // job_id|nonce — duplicate shares
 	accepted uint64
 	rejected uint64
 	blocks   uint64
@@ -240,7 +251,7 @@ type sconn struct {
 
 func newSconn(s *Server, c net.Conn, ip string) *sconn {
 	return &sconn{s: s, conn: c, ip: ip, enc: json.NewEncoder(c), since: time.Now(),
-		lanes: map[mh.Lane]*laneState{}, seen: map[string]bool{}, tokens: 40, tokensAt: time.Now()}
+		lanes: map[mh.Lane]*laneState{}, tokens: 40, tokensAt: time.Now()}
 }
 
 func (c *sconn) write(v any) {
@@ -408,12 +419,9 @@ func (c *sconn) pushJob(id mh.Lane) {
 	}
 	st.target = clampTarget(st.target, block, c.s.b.Params())
 	st.target.FillBytes(j.Target[:])
-	st.jobs = append(st.jobs, j)
+	st.jobs = append(st.jobs, &issued{Job: j, seen: map[uint64]struct{}{}})
 	if len(st.jobs) > 8 {
 		st.jobs = st.jobs[len(st.jobs)-8:]
-	}
-	if len(c.seen) > 100_000 {
-		c.seen = map[string]bool{}
 	}
 	c.mu.Unlock()
 	c.notify("job", JobParamsFrom(j))
@@ -463,7 +471,7 @@ func (c *sconn) submit(raw json.RawMessage) (*SubmitResult, *Error) {
 		return nil, &Error{ErrCodeRateLimit, "too many shares — difficulty will rise"}
 	}
 	c.tokens--
-	var job *work.Job
+	var job *issued
 	var st *laneState
 	for _, s := range c.lanes {
 		for _, j := range s.jobs {
@@ -477,14 +485,15 @@ func (c *sconn) submit(raw json.RawMessage) (*SubmitResult, *Error) {
 		c.mu.Unlock()
 		return nil, &Error{ErrCodeStale, "stale job"}
 	}
-	key := p.JobID + "|" + p.Nonce
-	if c.seen[key] {
+	// The nonce is compared as a number: the same nonce can be written in more than one way (the hex
+	// digits in either case) and it is one share however it is written.
+	if _, dup := job.seen[nonce]; dup {
 		c.invalid++
 		c.rejected++
 		c.mu.Unlock()
 		return nil, &Error{ErrCodeDuplicate, "duplicate share"}
 	}
-	c.seen[key] = true
+	job.seen[nonce] = struct{}{}
 	c.mu.Unlock()
 
 	h := job.Header

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"powmachina/internal/mh"
+	"powmachina/internal/safetext"
 	"powmachina/internal/work"
 )
 
@@ -30,6 +31,16 @@ type Client struct {
 	nextID  uint64
 	pending map[uint64]chan *Response
 }
+
+// maxServerText is how much of a text the server wrote the client keeps: the name of the network,
+// the reason for a pause or for refusing a share. They are a few words; the cap is for a server
+// that sends a few kilobytes instead.
+const maxServerText = 200
+
+// fromServer makes a text the server wrote fit to print. The miner shows these texts on a terminal
+// and writes them to its log, and the server — or whoever sits on the wire of a connection without
+// TLS — chooses every byte of them.
+func fromServer(s string) string { return safetext.Line(s, maxServerText) }
 
 func (c *Client) logf(format string, a ...any) {
 	if c.Log != nil {
@@ -71,7 +82,8 @@ func (c *Client) Run(lanes []mh.Lane, set func(mh.Lane, *work.Job), quit <-chan 
 		if errors.As(err, &se) && se.Code == ErrCodeBadLogin {
 			return fmt.Errorf("stratum login rejected: %s", se.Message)
 		}
-		c.logf("stratum: %v — reconnecting in %v", err, backoff)
+		// The error can quote what the server sent, a line that would not parse for one.
+		c.logf("stratum: %s — reconnecting in %v", safetext.Line(fmt.Sprint(err), 2*maxServerText), backoff)
 		select {
 		case <-quit:
 			return nil
@@ -145,6 +157,9 @@ func (c *Client) session(lanes []mh.Lane, set func(mh.Lane, *work.Job), quit <-c
 		if err := json.Unmarshal(line, &msg); err != nil {
 			return fmt.Errorf("bad message from server: %w", err)
 		}
+		if msg.Error != nil {
+			msg.Error.Message = fromServer(msg.Error.Message)
+		}
 		if msg.Method == "" && msg.ID != nil {
 			resp := &Response{ID: *msg.ID, Result: msg.Result, Error: msg.Error}
 			c.deliver(resp)
@@ -154,7 +169,7 @@ func (c *Client) session(lanes []mh.Lane, set func(mh.Lane, *work.Job), quit <-c
 				}
 				var res LoginResult
 				_ = json.Unmarshal(resp.Result, &res)
-				c.logf("stratum: connected to %s (%s)", c.URL, res.Network)
+				c.logf("stratum: connected to %s (%s)", c.URL, fromServer(res.Network))
 				loggedIn = true
 			}
 			continue
@@ -175,7 +190,7 @@ func (c *Client) session(lanes []mh.Lane, set func(mh.Lane, *work.Job), quit <-c
 			if err := json.Unmarshal(msg.Params, &p); err == nil {
 				if l, ok := ParseLane(p.Lane); ok {
 					set(l, nil)
-					c.logf("lane %s: paused by server: %s", p.Lane, p.Reason)
+					c.logf("lane %s: paused by server: %s", l, fromServer(p.Reason))
 				}
 			}
 		}

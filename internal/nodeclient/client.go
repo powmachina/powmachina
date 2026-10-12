@@ -10,12 +10,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	"powmachina/internal/chain"
+	"powmachina/internal/safetext"
 	"powmachina/internal/work"
 )
 
@@ -25,7 +27,21 @@ type Client struct {
 	token string
 	http  *http.Client
 	id    atomic.Uint64
+	// network: the network the node has to be on (ExpectNetwork); empty = whatever it is on.
+	network string
 }
+
+// ErrWrongNetwork: the node is on another network than the caller works on.
+var ErrWrongNetwork = errors.New("node is on another network")
+
+// ExpectNetwork makes the client refuse a node on any other network (mainnet, testnet, regtest). Call it
+// before the client is shared.
+//
+// A wallet needs this more than anybody: the keys are the same on every network and only the prefix of
+// the address differs, so a mainnet wallet pointed at a testnet node by one wrong port would scan the
+// testnet chain and report its worthless coins as confirmed deposits. Tip checks it, and every sync
+// starts with Tip — a node swapped for another one later is caught the same way as a wrong one at start.
+func (c *Client) ExpectNetwork(name string) { c.network = name }
 
 // New creates a client. `addr` is host:port or a full http(s):// URL.
 func New(addr, token string) *Client {
@@ -41,6 +57,35 @@ const MaxResponseBytes = 128 << 20
 
 // ErrRPC is an error the node returned (not a network error).
 var ErrRPC = errors.New("node")
+
+// refusal is a failure that leaves no doubt the node did not do what was asked: it answered with an
+// error of its own, it turned the token down, or no connection to it was ever made. A timeout, a broken
+// connection or an error page from something in between are NOT refusals — the request may have been
+// carried out and only the answer lost. The wallet decides by this whether a payment may be forgotten
+// (wallet.Rejected).
+type refusal struct {
+	err error
+	// temporary: the node has no room for the transaction right now; nothing is wrong with it.
+	temporary bool
+}
+
+func (r *refusal) Error() string   { return r.err.Error() }
+func (r *refusal) Unwrap() error   { return r.err }
+func (r *refusal) Rejected() bool  { return true }
+func (r *refusal) Temporary() bool { return r.temporary }
+
+// maxNodeText is how much of a text the node wrote ends up in an error.
+const maxNodeText = 500
+
+// fromNode makes a text from the node's answer fit to carry in an error. The errors are printed —
+// by the wallet, the miner, the signer — and the answer is whatever is at the other end of the
+// address the client was given: a body of megabytes, or one with terminal escapes in it.
+func fromNode(s string) string {
+	if len(s) > 2*maxNodeText {
+		s = s[:2*maxNodeText]
+	}
+	return safetext.Line(strings.TrimSpace(s), maxNodeText)
+}
 
 // Call calls a method and unpacks the result into `out` (which may be nil).
 func (c *Client) Call(ctx context.Context, method string, params, out any) error {
@@ -58,7 +103,13 @@ func (c *Client) Call(ctx context.Context, method string, params, out any) error
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("node %s is not reachable: %w", c.url, err)
+		err = fmt.Errorf("node %s is not reachable: %w", c.url, err)
+		// A connection that was never made carried nothing; one that broke later may have.
+		var op *net.OpError
+		if errors.As(err, &op) && op.Op == "dial" {
+			return &refusal{err: err}
+		}
+		return err
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, MaxResponseBytes))
@@ -66,10 +117,10 @@ func (c *Client) Call(ctx context.Context, method string, params, out any) error
 		return err
 	}
 	if resp.StatusCode == http.StatusUnauthorized {
-		return fmt.Errorf("%w: invalid RPC token (POWM_RPC_TOKEN)", ErrRPC)
+		return &refusal{err: fmt.Errorf("%w: invalid RPC token (POWM_RPC_TOKEN)", ErrRPC)}
 	}
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("%w: HTTP %d: %s", ErrRPC, resp.StatusCode, strings.TrimSpace(string(data)))
+		return fmt.Errorf("%w: HTTP %d: %s", ErrRPC, resp.StatusCode, fromNode(string(data[:min(len(data), 2*maxNodeText)])))
 	}
 	var r struct {
 		Result json.RawMessage `json:"result"`
@@ -81,7 +132,7 @@ func (c *Client) Call(ctx context.Context, method string, params, out any) error
 		return fmt.Errorf("%w: unreadable response", ErrRPC)
 	}
 	if r.Error != nil {
-		return fmt.Errorf("%w: %s", ErrRPC, r.Error.Message)
+		return &refusal{err: fmt.Errorf("%w: %s", ErrRPC, fromNode(r.Error.Message))}
 	}
 	if out == nil || len(r.Result) == 0 {
 		return nil
@@ -98,11 +149,15 @@ func (c *Client) Tip() (uint64, [32]byte, error) {
 	ctx, cancel := c.ctx()
 	defer cancel()
 	var info struct {
-		Height uint64 `json:"height"`
-		Tip    string `json:"tip"`
+		Network string `json:"network"`
+		Height  uint64 `json:"height"`
+		Tip     string `json:"tip"`
 	}
 	if err := c.Call(ctx, "getinfo", nil, &info); err != nil {
 		return 0, [32]byte{}, err
+	}
+	if c.network != "" && info.Network != c.network {
+		return 0, [32]byte{}, fmt.Errorf("%w: %s reports %q, expected %s", ErrWrongNetwork, c.url, info.Network, c.network)
 	}
 	id, err := hex32(info.Tip)
 	return info.Height, id, err
@@ -162,18 +217,33 @@ func (c *Client) Mempool() ([][32]byte, error) {
 	return out, nil
 }
 
-// Broadcast implements wallet.Node.
+// Broadcast implements wallet.Node. A node that already holds the transaction has not refused it: that is
+// the answer to the second attempt after a first one whose reply was lost, and it means success.
 func (c *Client) Broadcast(tx *chain.Tx) error {
 	ctx, cancel := c.ctx()
 	defer cancel()
-	return c.Call(ctx, "sendrawtransaction", map[string]any{"hex": hex.EncodeToString(tx.Serialize())}, nil)
+	err := c.Call(ctx, "sendrawtransaction", map[string]any{"hex": hex.EncodeToString(tx.Serialize())}, nil)
+	var r *refusal
+	if !errors.As(err, &r) {
+		return err
+	}
+	// The node's RPC carries its reasons as text only, so the text of the mempool's own errors is what
+	// there is to tell them apart by.
+	said := func(reason error) bool { return strings.Contains(err.Error(), reason.Error()) }
+	switch {
+	case said(chain.ErrMempoolDuplicate):
+		return nil
+	case said(chain.ErrMempoolFull), said(chain.ErrChainTooLong):
+		return &refusal{err: r.err, temporary: true}
+	}
+	return err
 }
 
 func hex32(s string) ([32]byte, error) {
 	var out [32]byte
 	b, err := hex.DecodeString(s)
 	if err != nil || len(b) != 32 {
-		return out, fmt.Errorf("%w: invalid ID %q", ErrRPC, s)
+		return out, fmt.Errorf("%w: invalid ID %q", ErrRPC, safetext.Line(s, 80))
 	}
 	copy(out[:], b)
 	return out, nil

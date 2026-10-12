@@ -44,6 +44,14 @@ type context struct {
 	verifier *mh.Verifier
 	randomx  *mh.RandomX
 
+	// life ties a hash in flight to the context it runs on. A caller closes a context from one
+	// thread (the epoch turned) while others are still hashing shares of that epoch on it, and
+	// closing frees what they are reading: the RandomX dataset is C memory, the DAG is dropped. So
+	// every hash holds life for reading, and closing takes it for writing — it waits for the hashes
+	// in flight and marks the context closed for the ones that found it a moment earlier.
+	life   sync.RWMutex
+	closed bool
+
 	mu      sync.Mutex
 	hashers []*mh.Hasher // one per thread that asked, reused
 }
@@ -107,22 +115,31 @@ func mh_open(epoch C.ulonglong, full C.int, randomx C.int, network *C.char) C.ul
 		setErr("network is a null pointer")
 		return 0
 	}
-	netName := C.GoString(network)
+	return C.ulonglong(openContext(uint64(epoch), full != 0, randomx != 0, C.GoString(network)))
+}
+
+// openContext is mh_open without the C types, so it can be called from a test.
+func openContext(epoch uint64, full, withRandomX bool, netName string) uint64 {
 	params, ok := networkMap[netName]
 	if !ok {
 		setErr("unknown network " + netName + " (expected mainnet, testnet or regtest)")
 		return 0
 	}
 	profile := params.DagProfile
-
-	ctx := &context{epoch: uint64(epoch)}
-	if full != 0 {
-		ctx.verifier = mh.NewVerifier(uint64(epoch), profile)
-	} else {
-		ctx.verifier = mh.NewLightVerifier(uint64(epoch), profile)
+	// The epoch is the caller's number, and it sizes everything built below.
+	if !mh.ValidEpoch(epoch) {
+		setErr("the epoch is past the last one a chain can reach")
+		return 0
 	}
-	if randomx != 0 {
-		rx, err := mh.NewRandomX(uint64(epoch), full != 0)
+
+	ctx := &context{epoch: epoch}
+	if full {
+		ctx.verifier = mh.NewVerifier(epoch, profile)
+	} else {
+		ctx.verifier = mh.NewLightVerifier(epoch, profile)
+	}
+	if withRandomX {
+		rx, err := mh.NewRandomX(epoch, full)
 		if err != nil {
 			ctx.verifier.Close()
 			setErr("RandomX for epoch could not be initialised: " + err.Error())
@@ -136,16 +153,25 @@ func mh_open(epoch C.ulonglong, full C.int, randomx C.int, network *C.char) C.ul
 	nextHandle++
 	handleMu.Unlock()
 	registry.Store(h, ctx)
-	return C.ulonglong(h)
+	return h
 }
 
+// mh_close frees a context. It may be called while other threads are hashing on the same handle:
+// it returns once the hashes in flight have finished, and a hash that starts after it answers
+// "unknown context handle". Closing a handle twice, or one that never existed, does nothing.
+//
 //export mh_close
-func mh_close(handle C.ulonglong) {
-	v, ok := registry.LoadAndDelete(uint64(handle))
+func mh_close(handle C.ulonglong) { closeContext(uint64(handle)) }
+
+func closeContext(handle uint64) {
+	v, ok := registry.LoadAndDelete(handle)
 	if !ok {
 		return
 	}
 	ctx := v.(*context)
+	ctx.life.Lock()
+	defer ctx.life.Unlock()
+	ctx.closed = true
 	ctx.mu.Lock()
 	for _, h := range ctx.hashers {
 		h.Close()
@@ -197,44 +223,71 @@ func mh_hash(handle C.ulonglong, lane C.int, header *C.uchar, nonce C.ulonglong,
 		setErr("header or out is a null pointer")
 		return errBadArgs
 	}
-	v, ok := registry.Load(uint64(handle))
+	ctx, ok := lookup(uint64(handle))
 	if !ok {
 		setErr("unknown context handle")
 		return errNoContext
 	}
-	ctx := v.(*context)
+	var hdr [mh.HeaderBytes]byte
+	copy(hdr[:], unsafe.Slice((*byte)(unsafe.Pointer(header)), mh.HeaderBytes))
+
+	sum, code := ctx.hash(int(lane), &hdr, uint64(nonce))
+	if code != errOK {
+		return C.int(code)
+	}
+	copy(unsafe.Slice((*byte)(unsafe.Pointer(out)), 32), sum[:])
+	return errOK
+}
+
+func lookup(handle uint64) (*context, bool) {
+	v, ok := registry.Load(handle)
+	if !ok {
+		return nil, false
+	}
+	return v.(*context), true
+}
+
+// hash computes one PoW hash on the context and returns it with an error code.
+//
+// It holds the context for the whole computation. A context that was closed between the caller
+// finding it and getting here is answered like a handle that does not exist — to the caller it is
+// the same thing, and what must never happen is hashing on memory that has been freed: that is not
+// an error code, it brings down the process the library is loaded in.
+func (c *context) hash(lane int, hdr *[mh.HeaderBytes]byte, nonce uint64) ([32]byte, int) {
+	c.life.RLock()
+	defer c.life.RUnlock()
+	if c.closed {
+		setErr("unknown context handle")
+		return [32]byte{}, errNoContext
+	}
 
 	var l mh.Lane
 	switch lane {
 	case 0:
 		l = mh.LaneC
-		if ctx.randomx == nil {
+		if c.randomx == nil {
 			setErr("this context was opened without RandomX, so it cannot hash lane C")
-			return errBadLane
+			return [32]byte{}, errBadLane
 		}
 	case 1:
 		l = mh.LaneG
 	default:
 		setErr("lane has to be 0 (C) or 1 (G)")
-		return errBadLane
+		return [32]byte{}, errBadLane
 	}
 
-	var hdr [mh.HeaderBytes]byte
-	copy(hdr[:], unsafe.Slice((*byte)(unsafe.Pointer(header)), mh.HeaderBytes))
-
-	h, err := ctx.hasherFor()
+	h, err := c.hasherFor()
 	if err != nil {
 		setErr("a hasher could not be created: " + err.Error())
-		return errHashFailed
+		return [32]byte{}, errHashFailed
 	}
-	sum, err := h.Hash(ctx.verifier, &hdr, uint64(nonce), l)
-	ctx.put(h)
+	sum, err := h.Hash(c.verifier, hdr, nonce, l)
+	c.put(h)
 	if err != nil {
 		setErr("the hash failed: " + err.Error())
-		return errHashFailed
+		return [32]byte{}, errHashFailed
 	}
-	copy(unsafe.Slice((*byte)(unsafe.Pointer(out)), 32), sum[:])
-	return errOK
+	return sum, errOK
 }
 
 // mh_epoch_for_height is here so the caller does not have to repeat the epoch length and get it
