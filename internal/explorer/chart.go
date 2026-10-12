@@ -119,7 +119,7 @@ type Chart struct {
 	Tips         []ChartTip
 	XTicks       []ChartTick
 	WindowBlocks int
-	Span         string // „last 6 hours“
+	Span         string // "last 6 hours"
 	Ranges       []ChartRange
 	Empty        bool
 }

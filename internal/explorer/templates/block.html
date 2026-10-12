@@ -35,6 +35,13 @@
   </tbody>
 </table>
 </div>
+{{if or (ge .Data.Prev 0) (ge .Data.Next 0)}}
+<div class="pager">
+  {{if ge .Data.Prev 0}}<a href="{{url "/block/"}}{{$b.ID}}?txs={{.Data.Prev}}">← previous</a>{{end}}
+  <span class="dim">{{add .Data.First 1}}–{{.Data.Last}} of {{len $b.Txs}}</span>
+  {{if ge .Data.Next 0}}<span class="spacer"></span><a href="{{url "/block/"}}{{$b.ID}}?txs={{.Data.Next}}">next →</a>{{end}}
+</div>
+{{end}}
 {{else}}
 <div class="scroll">
 <table>

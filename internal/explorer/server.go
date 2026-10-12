@@ -220,13 +220,48 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 	defer cancel()
 	p := s.newPage(r, "Not found")
 	p.Err = msg
-	var info Info
-	if err := s.cli.Call(ctx, "getinfo", nil, &info); err == nil {
-		p.Info = &info
+	// The status line of the network is an extra. A request that could not have matched anything is
+	// answered without it, so it costs the node nothing at all.
+	if err != errShape {
+		var info Info
+		if err := s.cli.Call(ctx, "getinfo", nil, &info); err == nil {
+			p.Info = &info
+		}
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
 	_ = s.tmpl.ExecuteTemplate(w, "error.html", p)
+}
+
+// errShape is the answer to a height, hash or address that cannot be one by its shape alone.
+//
+// The values come from the address of the page, typed by anybody. The node would refuse them too,
+// but each refusal is a call to it: the explorer is public and the node behind it is not, so what
+// can be decided here is decided here. Only the shape is checked — whether an address has a valid
+// checksum or a hash names a block is the node's answer to give.
+var errShape = &Err{Msg: "not a height, a hash or an address"}
+
+// maxAddressLen is the longest address the node decodes (address.MaxLength).
+const maxAddressLen = 90
+
+// isHash says whether s has the shape of a block id or a txid: 32 bytes in hex.
+func isHash(s string) bool { return len(s) == 64 && isHex(s) }
+
+// isHeight says whether s has the shape of a height: a number that fits into a uint64.
+func isHeight(s string) bool { return isDigits(s) && len(s) < 20 }
+
+// isAddressShaped says whether s could be an address: bech32m is letters and digits, nothing else.
+func isAddressShaped(s string) bool {
+	if s == "" || len(s) > maxAddressLen {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') {
+			return false
+		}
+	}
+	return true
 }
 
 type homeData struct {
@@ -311,7 +346,13 @@ func (s *Server) handleBlocks(w http.ResponseWriter, r *http.Request) {
 
 type blockData struct {
 	Block Block
+	// Txs are the transactions of the stretch [First, Last) of the block, in the block's order.
 	Txs   []Tx
+	First int
+	Last  int
+	// Prev and Next are the positions the neighbouring pages start at; -1 = there is none.
+	Prev int
+	Next int
 }
 
 func (s *Server) handleBlock(w http.ResponseWriter, r *http.Request) {
@@ -322,10 +363,15 @@ func (s *Server) handleBlock(w http.ResponseWriter, r *http.Request) {
 	params := map[string]any{}
 	// A number is a height, hex is a block id. The explorer tells them apart itself, so a visitor does
 	// not have to know what belongs in the field.
-	if h, err := strconv.ParseUint(id, 10, 64); err == nil && len(id) < 20 {
+	switch {
+	case isHeight(id):
+		h, _ := strconv.ParseUint(id, 10, 64)
 		params["height"] = h
-	} else {
+	case isHash(id):
 		params["id"] = id
+	default:
+		s.fail(w, r, errShape)
+		return
 	}
 
 	var b Block
@@ -333,10 +379,17 @@ func (s *Server) handleBlock(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	d := blockData{Block: b}
-	// The transactions are loaded one by one. A block has a cap of 256 kB, so there are hundreds of them
-	// rather than thousands — and a block's detail is the page where that matters.
-	for _, txid := range b.Txs {
+	d := blockData{Block: b, Prev: -1, Next: -1}
+	// The transactions are loaded one by one, and each one is a call to the node. A full block has
+	// hundreds of them, so the page shows one stretch of the block and links to the rest: what one
+	// request can make the node do is bounded by the page, not by the block.
+	//
+	// A position that is not a number, or lies past the end of the block, is the first page.
+	if n, err := strconv.Atoi(r.URL.Query().Get("txs")); err == nil && n > 0 && n < len(b.Txs) {
+		d.First = n
+	}
+	end := min(d.First+blockTxLimit, len(b.Txs))
+	for _, txid := range b.Txs[d.First:end] {
 		var tx Tx
 		if err := s.cli.Call(ctx, "getrawtransaction", map[string]any{"txid": txid}, &tx); err != nil {
 			// Without the txindex transactions cannot be looked up; the block is shown anyway.
@@ -344,14 +397,24 @@ func (s *Server) handleBlock(w http.ResponseWriter, r *http.Request) {
 		}
 		d.Txs = append(d.Txs, tx)
 	}
+	d.Last = d.First + len(d.Txs)
+	if len(d.Txs) > 0 {
+		if d.First > 0 {
+			d.Prev = max(d.First-blockTxLimit, 0)
+		}
+		if d.Last < len(b.Txs) {
+			d.Next = d.Last
+		}
+	}
 	s.render(w, r, "block.html", "Block "+strconv.FormatUint(b.Height, 10), "blocks", d)
 }
 
-// The cap on the list of recent transactions. Each one is a call to the node, so without it a full
+// The caps on the lists of transactions. Each one is a call to the node, so without them a full
 // block (256 kB, hundreds of transactions) would turn rendering the page into hundreds of calls.
 const (
 	recentTxBlocks = 10
 	recentTxLimit  = 50
+	blockTxLimit   = 50
 )
 
 type txsData struct {
@@ -400,9 +463,13 @@ func (s *Server) handleTx(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), s.cfg.Timeout)
 	defer cancel()
 
+	txid := r.PathValue("txid")
+	if !isHash(txid) {
+		s.fail(w, r, errShape)
+		return
+	}
 	var tx Tx
-	if err := s.cli.Call(ctx, "getrawtransaction",
-		map[string]any{"txid": r.PathValue("txid")}, &tx); err != nil {
+	if err := s.cli.Call(ctx, "getrawtransaction", map[string]any{"txid": txid}, &tx); err != nil {
 		s.fail(w, r, err)
 		return
 	}
@@ -422,7 +489,12 @@ func (s *Server) handleAddress(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), s.cfg.Timeout)
 	defer cancel()
 
-	params := map[string]any{"address": r.PathValue("addr"), "limit": s.cfg.TxsPerPage}
+	addr := r.PathValue("addr")
+	if !isAddressShaped(addr) {
+		s.fail(w, r, errShape)
+		return
+	}
+	params := map[string]any{"address": addr, "limit": s.cfg.TxsPerPage}
 	if v := r.URL.Query().Get("before"); v != "" {
 		n, err := strconv.ParseUint(v, 10, 64)
 		if err != nil {
@@ -482,9 +554,9 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, b+"/", http.StatusSeeOther)
 	// A height is a number that fits into a uint64. A hash of nothing but digits is improbable, but a
 	// 64-digit number is not a height and must not be treated as one.
-	case isDigits(q) && len(q) < 20:
+	case isHeight(q):
 		http.Redirect(w, r, b+"/block/"+q, http.StatusSeeOther)
-	case len(q) == 64 && isHex(q):
+	case isHash(q):
 		// 64 hex characters is both a block id and a txid. The block is tried first, then the transaction —
 		// guessing from nothing would mean sending half the searches to a 404.
 		ctx, cancel := context.WithTimeout(r.Context(), s.cfg.Timeout)

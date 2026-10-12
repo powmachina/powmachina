@@ -3,6 +3,7 @@ package explorer
 import (
 	"net/http"
 	"net/url"
+	"strings"
 )
 
 // The theme can be switched **without JavaScript** too.
@@ -58,16 +59,29 @@ func withTheme(next http.Handler) http.Handler {
 			})
 		}
 		q.Del(themeCookie)
-		u := *r.URL
-		u.RawQuery = q.Encode()
-		http.Redirect(w, r, u.RequestURI(), http.StatusSeeOther)
+		http.Redirect(w, r, localTarget(r.URL, q), http.StatusSeeOther)
 	})
+}
+
+// localTarget is the request's own address with another query, for a redirect or a link back to it.
+//
+// The path is taken from the request as it came, before the router cleans it, and a path that starts
+// with two slashes is not a path to a browser: `//host/x` in a Location header or in an href names
+// another site. The leading slashes are collapsed to one, so the target always stays on this server.
+func localTarget(in *url.URL, q url.Values) string {
+	u := url.URL{
+		Path:     "/" + strings.TrimLeft(in.Path, "/"),
+		RawQuery: q.Encode(),
+	}
+	if in.RawPath != "" {
+		u.RawPath = "/" + strings.TrimLeft(in.RawPath, "/")
+	}
+	return u.RequestURI()
 }
 
 // themeLink assembles the link that switches the theme for the current address.
 func themeLink(r *http.Request, to string) string {
 	q := r.URL.Query()
 	q.Set(themeCookie, to)
-	u := url.URL{Path: r.URL.Path, RawQuery: q.Encode()}
-	return u.RequestURI()
+	return localTarget(r.URL, q)
 }

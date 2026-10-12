@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"regexp"
 	"strings"
 	"testing"
@@ -286,6 +287,47 @@ func TestThemeSwitch(t *testing.T) {
 	body := getWith(t, h, "/explorer/", set).Body.String()
 	if !strings.Contains(body, `data-theme="dark"`) {
 		t.Fatal("the page does not carry data-theme, the theme would not take effect")
+	}
+}
+
+// The redirect after a theme switch has to stay on this server. The path is read before the router
+// cleans it, and `//host/path` in a Location header is another site to a browser — a link to the
+// explorer would then land a visitor on somebody else's page.
+func TestThemeSwitchNeverRedirectsOffSite(t *testing.T) {
+	node := fakeNode(t, nil)
+	defer node.Close()
+	h := newTestServer(t, node)
+
+	cases := map[string]string{
+		"//evil.example/download?theme=dark":      "/evil.example/download",
+		"///evil.example/download?theme=dark":     "/evil.example/download",
+		"//evil.example/?theme=neon":              "/evil.example/",
+		"//evil.example/a%2Fb?theme=dark&from=20": "/evil.example/a%2Fb?from=20",
+		"/explorer/blocks?from=20&theme=dark":     "/explorer/blocks?from=20",
+		"/%5Cevil.example/?theme=dark":            "/%5Cevil.example/",
+	}
+	for target, want := range cases {
+		// The address is set on the request as the server parses it off the wire: a target that starts
+		// with two slashes is a path there, not a host.
+		u, err := url.ParseRequestURI(target)
+		if err != nil {
+			t.Fatalf("%q: %v", target, err)
+		}
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.URL = u
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusSeeOther {
+			t.Errorf("%q: status %d, expected 303", target, rec.Code)
+			continue
+		}
+		got := rec.Header().Get("Location")
+		if got != want {
+			t.Errorf("%q redirected to %q, expected %q", target, got, want)
+		}
+		if strings.HasPrefix(got, "//") || !strings.HasPrefix(got, "/") {
+			t.Errorf("%q redirected to %q — that is not an address on this server", target, got)
+		}
 	}
 }
 
