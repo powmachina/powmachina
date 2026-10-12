@@ -1,8 +1,8 @@
 # Desktop wallet installers.
 #
 # Why hosted runners: Tauri **cannot be cross-built** —
-# it links against the system webview (WebView2 on Windows, WKWebView on macOS). We can build Linux
-# at home (`scripts/gui-build.sh`), these two we cannot.
+# it links against the system webview (WebView2 on Windows, WKWebView on macOS). Linux we can build
+# ourselves (`scripts/gui-build.sh`), these two we cannot.
 #
 # The platform is chosen deliberately: macOS runners are the slowest and scarcest of the three, so
 # "build everything" has to be a decision, not a default.

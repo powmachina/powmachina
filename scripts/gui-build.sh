@@ -2,7 +2,7 @@
 # Builds the desktop wallet for Linux **in a container**.
 #
 # The reason: on Linux Tauri links against `libwebkit2gtk-4.1-dev`, and those headers are not on the
-# workstation (the library itself is, so the result does run). Windows and macOS are built by GitHub
+# machine that builds (the library itself is, so the result does run). Windows and macOS are built by GitHub
 # Actions — Tauri cannot be cross-built.
 #
 #   scripts/gui-build.sh            # the binary (fast, for trying it out)
