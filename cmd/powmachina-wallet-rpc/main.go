@@ -161,6 +161,8 @@ func syncLoop(name string, w *wallet.Wallet, node wallet.Node, every time.Durati
 	for {
 		res, err := w.Sync(node)
 		switch {
+		case errors.Is(err, wallet.ErrClosed):
+			return // unloaded while running; a wallet loaded again gets a loop of its own
 		case err != nil:
 			log.Printf("%s: sync: %v", name, err)
 		case res.To != res.From || len(res.Received) > 0 || res.RolledBack > 0:

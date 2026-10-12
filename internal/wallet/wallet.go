@@ -31,6 +31,7 @@ const payloadVersion = 1
 
 var (
 	ErrExists       = errors.New("wallet: file already exists — refusing to overwrite it")
+	ErrClosed       = errors.New("wallet: the wallet is closed")
 	ErrUnknownKey   = errors.New("wallet: the wallet does not have the key for this address")
 	ErrBadAddress   = errors.New("wallet: invalid address")
 	ErrNoFunds      = errors.New("wallet: insufficient funds")
@@ -100,6 +101,9 @@ type Wallet struct {
 	kdf  KDFParams
 	salt [saltBytes]byte
 	key  []byte // the file's key (from Argon2id), kept in memory for saving
+	// closed: Close has run, the key is gone and the file lock is released. Nothing may be written
+	// from here on — a save would seal the file with the zeroed key.
+	closed bool
 
 	entropy    []byte
 	keys       *keychain
@@ -246,11 +250,16 @@ func openLocked(path, password string, params chain.NetParams, lk *fileLock) (*W
 	return w, nil
 }
 
-// Close saves the state and releases the lock.
+// Close saves the state and releases the lock. The wallet is of no use afterwards: whoever still holds
+// it (a sync loop, a request in flight) gets ErrClosed instead of a save. A second Close does nothing.
 func (w *Wallet) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if w.closed {
+		return nil
+	}
 	err := w.saveLocked()
+	w.closed = true
 	w.lock.unlock()
 	for i := range w.key {
 		w.key[i] = 0
@@ -266,6 +275,9 @@ func (w *Wallet) Save() error {
 }
 
 func (w *Wallet) saveLocked() error {
+	if w.closed {
+		return ErrClosed
+	}
 	plain, err := w.marshalPayload()
 	if err != nil {
 		return err

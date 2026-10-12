@@ -42,7 +42,11 @@ func (w *Wallet) Sync(node Node) (*SyncResult, error) {
 	res := &SyncResult{}
 	w.mu.Lock()
 	res.From = w.height
+	closed := w.closed
 	w.mu.Unlock()
+	if closed {
+		return res, ErrClosed
+	}
 	for attempt := 0; ; attempt++ {
 		if attempt > 10 {
 			return res, errors.New("wallet: the chain changes faster than it can be scanned")

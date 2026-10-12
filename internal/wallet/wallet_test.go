@@ -645,3 +645,58 @@ func TestPlanSweepEmpty(t *testing.T) {
 		t.Fatalf("%+v, %v", plan, err)
 	}
 }
+
+// A wallet that was closed has no key any more. Whoever still holds it — the sync loop of a wallet
+// unloaded over RPC — must not write: the save would seal the file with the zeroed key, the password
+// would stop opening it and anybody could read the words.
+func TestAClosedWalletWritesNothing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mywallet")
+	w, _, err := Create(path, "password", params, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := wallettest.NewNode()
+	pk := pubOf(t, w, must(w.NewAddress("")))
+	n.Mine(&pk, nil)
+	mustSync(t, w, n)
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	n.Mine(&pk, nil) // something new to sync, so the loop has every reason to save
+	if _, err := w.Sync(n); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Sync on a closed wallet: %v, want ErrClosed", err)
+	}
+	if err := w.Save(); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Save on a closed wallet: %v, want ErrClosed", err)
+	}
+	if _, err := w.NewAddress(""); !errors.Is(err, ErrClosed) {
+		t.Fatalf("NewAddress on a closed wallet: %v, want ErrClosed", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("a second Close: %v", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Fatal("the file changed after Close")
+	}
+	f, err := parseFile(after)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.open(make([]byte, len(w.key))); err == nil {
+		t.Fatal("the file opens with a key of zeroes")
+	}
+	again, err := Open(path, "password", params)
+	if err != nil {
+		t.Fatalf("the password no longer opens the wallet: %v", err)
+	}
+	again.Close()
+}
