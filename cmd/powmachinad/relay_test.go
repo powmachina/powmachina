@@ -56,7 +56,7 @@ func TestNodeAcceptsRelayedTransaction(t *testing.T) {
 	tx := &chain.Tx{Version: 1,
 		Inputs:  []chain.TxIn{{PrevTxID: op.TxID, PrevIndex: op.Index}},
 		Outputs: []chain.TxOut{{Value: 900_000, Script: pk[:]}}}
-	sig, err := chain.SignInput(tx, 0, []chain.Coin{coin}, sk)
+	sig, err := chain.SignInput(tx, 0, []chain.Coin{coin}, sk, chain.RegTest.At(1))
 	if err != nil {
 		t.Fatal(err)
 	}

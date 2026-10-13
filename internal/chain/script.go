@@ -13,9 +13,9 @@ import (
 // 64-byte Schnorr signature. That is deliberately little — every further type is surface for bugs
 // and one can be added with a soft fork through the reserved versions.
 //
-// Versions 1–15 are reserved: old nodes treat them today as spendable by anybody (SPEC §2.4).
-// That is exactly what allows a new script type to be introduced without a hard fork — but it
-// means that **nobody should send funds to such an output until the version is activated**.
+// Versions 1–15 are reserved for script types to come. From ForkStrictOutputs on an output of a
+// reserved version can neither be created nor spent until a fork defines it (txrules.go); before
+// it, such an output was spendable by anybody.
 
 const (
 	// PubkeyBytes is the length of an x-only public key.
@@ -31,7 +31,7 @@ var (
 )
 
 // VerifyInput verifies that input `index` may spend `coin`.
-func VerifyInput(tx *Tx, index int, coins []Coin) error {
+func VerifyInput(tx *Tx, index int, coins []Coin, rules Rules) error {
 	coin := coins[index]
 
 	switch {
@@ -52,14 +52,18 @@ func VerifyInput(tx *Tx, index int, coins []Coin) error {
 		copy(pubkey[:], coin.Script)
 		copy(sig[:], sigBytes)
 
-		msg := SigHash(tx, index, coins)
+		msg := SigHash(tx, index, coins, rules)
 		if !mh.SchnorrVerify(&msg, &pubkey, &sig) {
 			return ErrBadTxSignature
 		}
 		return nil
 
 	case coin.ScriptVersion <= ScriptVersionMaxReserved:
-		// A reserved version — spendable by anybody today, so it can be activated with a soft fork.
+		// A reserved version. Before ForkStrictOutputs such an output could be spent by anybody;
+		// from it on it cannot be spent at all until a fork says how.
+		if rules.Active(ForkStrictOutputs) {
+			return fmt.Errorf("%w: version %d has no spending rule", ErrTxBadVersion, coin.ScriptVersion)
+		}
 		return nil
 
 	default:
@@ -69,8 +73,8 @@ func VerifyInput(tx *Tx, index int, coins []Coin) error {
 }
 
 // SignInput creates the signature for an input — for the wallet and for tests.
-func SignInput(tx *Tx, index int, coins []Coin, seckey *[32]byte) ([]byte, error) {
-	msg := SigHash(tx, index, coins)
+func SignInput(tx *Tx, index int, coins []Coin, seckey *[32]byte, rules Rules) ([]byte, error) {
+	msg := SigHash(tx, index, coins, rules)
 	sig, err := mh.SchnorrSign(&msg, seckey)
 	if err != nil {
 		return nil, err

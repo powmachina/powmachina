@@ -130,6 +130,11 @@ func (m *Mempool) acceptLocked(tx *Tx, utxo CoinView, height uint64) (*MempoolEn
 	if _, dup := m.entries[txid]; dup {
 		return nil, ErrMempoolDuplicate
 	}
+	// The rules of the next block: a transaction that could not go into it is not kept waiting.
+	rules := m.params.At(height)
+	if err := tx.CheckRules(rules); err != nil {
+		return nil, err
+	}
 
 	// The inputs: they have to exist and must not be spent by another transaction in the pool.
 	//
@@ -185,7 +190,7 @@ func (m *Mempool) acceptLocked(tx *Tx, utxo CoinView, height uint64) (*MempoolEn
 
 	// The signatures last — they are the most expensive.
 	for i := range tx.Inputs {
-		if err := VerifyInput(tx, i, coins); err != nil {
+		if err := VerifyInput(tx, i, coins, rules); err != nil {
 			return nil, fmt.Errorf("input %d: %w", i, err)
 		}
 	}

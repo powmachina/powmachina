@@ -43,7 +43,7 @@ func spendScene(t *testing.T, params chain.NetParams, badSignature bool) (*Node,
 	tx := &chain.Tx{Version: 1,
 		Inputs:  []chain.TxIn{{PrevTxID: op.TxID, PrevIndex: op.Index}},
 		Outputs: []chain.TxOut{{Value: 1_000_000, Script: pk[:]}}}
-	sig, err := chain.SignInput(tx, 0, []chain.Coin{coin}, sk)
+	sig, err := chain.SignInput(tx, 0, []chain.Coin{coin}, sk, params.At(3))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,11 +230,16 @@ func TestChainCrossesTheWitnessCommitmentFork(t *testing.T) {
 			t.Fatalf("height %d (fork at %d): signals %v, commits %v", h, fork, signals, commits)
 		}
 	}
-	st := src.chain.ForkStatus()
-	if len(st.Forks) != 1 || !st.Forks[0].Active || st.Forks[0].Height != fork {
-		t.Fatalf("the fork status after the height: %+v", st.Forks)
+	var st chain.ForkState
+	for _, f := range src.chain.ForkStatus().Forks {
+		if f.Fork == chain.ForkWitnessCommitment {
+			st = f
+		}
 	}
-	if got := st.Forks[0].Signalling[mh.LaneC] + st.Forks[0].Signalling[mh.LaneG]; got != fork-1 {
+	if !st.Known || !st.Active || st.Height != fork {
+		t.Fatalf("the fork status after the height: %+v", st)
+	}
+	if got := st.Signalling[mh.LaneC] + st.Signalling[mh.LaneG]; got != fork-1 {
 		t.Fatalf("%d blocks signalled, expected the %d below the fork", got, fork-1)
 	}
 
@@ -262,5 +267,52 @@ func TestChainCrossesTheWitnessCommitmentFork(t *testing.T) {
 	}
 	if err := unsealed.ValidateBlock(node.store, params); !errors.Is(err, chain.ErrNoWitnessCommitment) {
 		t.Fatalf("a block without a commitment at the fork height: %v", err)
+	}
+}
+
+// A transaction waiting in the mempool when a signature rule starts was signed for the old rules.
+// The node drops it as the last block before the fork is applied; left in, it would go into the
+// node's own next template and the node would mine a block it refuses itself.
+func TestMempoolIsClearedOfOldSignaturesAtAFork(t *testing.T) {
+	const fork = 3
+	params := chain.RegTest
+	params.Forks = []chain.ForkAt{{Fork: chain.ForkSignedNetwork, Height: fork}}
+
+	src := NewNode(params, chain.RegtestGenesis(), mh.TestProfile)
+	defer src.Close()
+	node := NewNode(params, chain.RegtestGenesis(), mh.TestProfile)
+	defer node.Close()
+
+	sk, pk, op, coin := fundedKey(t, node, 77, 1_000_000)
+	tx := &chain.Tx{Version: 1,
+		Inputs:  []chain.TxIn{{PrevTxID: op.TxID, PrevIndex: op.Index}},
+		Outputs: []chain.TxOut{{Value: 900_000, Script: pk}}}
+	sig, err := chain.SignInput(tx, 0, []chain.Coin{coin}, sk, params.At(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx.Witness = []chain.Witness{{Items: [][]byte{sig}}}
+	if err := node.SubmitTx(tx); err != nil {
+		t.Fatalf("below the fork: %v", err)
+	}
+
+	// Two blocks from elsewhere that do not carry the transaction.
+	if err := src.MineBlocks(fork - 1); err != nil {
+		t.Fatal(err)
+	}
+	feedBranch(t, node, src, 1, 1)
+	if node.mempool.Len() != 1 {
+		t.Fatalf("after block 1 the mempool holds %d transactions, want 1", node.mempool.Len())
+	}
+	feedBranch(t, node, src, 2, fork-1)
+	if node.mempool.Len() != 0 {
+		t.Fatal("the transaction signed for the old rules is still in the mempool at the fork")
+	}
+	// And the node's own block at the fork height is one it accepts.
+	if err := node.MineBlocks(1); err != nil {
+		t.Fatalf("the node's own block at the fork height: %v", err)
+	}
+	if _, h, _ := node.chain.Tip(); h != fork {
+		t.Fatalf("the tip is at %d, want %d", h, fork)
 	}
 }

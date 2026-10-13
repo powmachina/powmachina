@@ -136,7 +136,7 @@ func TestAcceptReportsMissingInputs(t *testing.T) {
 		Inputs: []TxIn{{PrevTxID: op.TxID, PrevIndex: op.Index},
 			{PrevTxID: ghost.TxID, PrevIndex: ghost.Index}},
 		Outputs: []TxOut{{Value: 900_000, Script: pk}}}
-	sig, err := SignInput(tx, 0, []Coin{coin, coin}, sk)
+	sig, err := SignInput(tx, 0, []Coin{coin, coin}, sk, RegTest.At(1))
 	if err != nil {
 		t.Fatal(err)
 	}

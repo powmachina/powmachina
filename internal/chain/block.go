@@ -120,6 +120,7 @@ func (b *Block) validate(u CoinView, params NetParams, signatures bool) error {
 	}
 
 	height := uint64(b.Header.Height)
+	rules := params.At(height)
 	seenTx := make(map[[32]byte]bool, len(b.Txs))
 	// Outputs created in this block — a transaction may spend an output of a previous one in the same block.
 	inBlock := make(map[Outpoint]Coin)
@@ -129,6 +130,9 @@ func (b *Block) validate(u CoinView, params NetParams, signatures bool) error {
 
 	for i, tx := range b.Txs {
 		if err := tx.CheckSanity(); err != nil {
+			return fmt.Errorf("transaction %d: %w", i, err)
+		}
+		if err := tx.CheckRules(rules); err != nil {
 			return fmt.Errorf("transaction %d: %w", i, err)
 		}
 		if i > 0 && tx.IsCoinbase() {
@@ -142,7 +146,7 @@ func (b *Block) validate(u CoinView, params NetParams, signatures bool) error {
 
 		var inValues []int64
 		if i > 0 {
-			fee, values, err := b.checkInputs(tx, u, inBlock, spent, height, signatures)
+			fee, values, err := b.checkInputs(tx, u, inBlock, spent, rules, signatures)
 			if err != nil {
 				return fmt.Errorf("transaction %d: %w", i, err)
 			}
@@ -190,8 +194,9 @@ func (b *Block) validate(u CoinView, params NetParams, signatures bool) error {
 // checkInputs verifies one transaction's inputs: their existence, maturity, double spending and
 // the conservation of value. It returns the fee.
 func (b *Block) checkInputs(tx *Tx, u CoinView, inBlock map[Outpoint]Coin,
-	spent map[Outpoint]bool, height uint64, signatures bool) (int64, []int64, error) {
+	spent map[Outpoint]bool, rules Rules, signatures bool) (int64, []int64, error) {
 
+	height := rules.Height
 	var inSum int64
 	// The coins are all collected first — the sighash commits to the amounts and the scripts of
 	// every input, so a signature cannot be verified before we know them.
@@ -225,7 +230,7 @@ func (b *Block) checkInputs(tx *Tx, u CoinView, inBlock map[Outpoint]Coin,
 		if !signatures {
 			break
 		}
-		if err := VerifyInput(tx, i, coins); err != nil {
+		if err := VerifyInput(tx, i, coins, rules); err != nil {
 			return 0, nil, fmt.Errorf("input %d: %w", i, err)
 		}
 	}
@@ -278,7 +283,7 @@ func (b *Block) checkCoinbase(height uint64, fees int64, params NetParams) error
 	}
 	first := cb.Outputs[0]
 	if first.Value != devFee || first.ScriptVersion != ScriptVersionBasic ||
-		!equalBytes(first.Script, params.DevFeeScript) {
+		!equalBytes(first.Script, params.DevFeeScriptAt(height)) {
 		return fmt.Errorf("%w: got %d cogs, expected %d", ErrDevFeeMissing, first.Value, devFee)
 	}
 	return nil
@@ -308,7 +313,7 @@ func BuildCoinbase(height uint64, fees int64, minerScript []byte, extra [32]byte
 	tx := &Tx{Version: 1, Inputs: []TxIn{{PrevTxID: extra, PrevIndex: CoinbaseIndex}}}
 	devFee := DevFee(height)
 	if devFee > 0 {
-		tx.Outputs = append(tx.Outputs, TxOut{Value: devFee, Script: params.DevFeeScript})
+		tx.Outputs = append(tx.Outputs, TxOut{Value: devFee, Script: params.DevFeeScriptAt(height)})
 	}
 	minerValue := Subsidy(height) - devFee + fees
 	if minerValue > 0 {

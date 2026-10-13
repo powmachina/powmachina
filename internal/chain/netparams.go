@@ -73,9 +73,13 @@ type NetParams struct {
 	// network (forks.go). A rule that is not listed is not active here.
 	Forks []ForkAt
 
-	// DevFeeScript is the script the dev fee has to go to (SPEC §2.1). Before mainnet launches it
-	// is replaced with the real 2-of-3 multisig script; until then there is a placeholder here,
-	// which deliberately has no business being on mainnet.
+	// DevFeeKey is the 32-byte key the dev fee is paid to (SPEC §2.1): the first output of every
+	// coinbase while the fee lasts. On mainnet it is one key, generated offline and never on a
+	// server; it is filled in before the genesis.
+	DevFeeKey []byte
+	// DevFeeScript is what the dev fee was paid to before ForkStrictOutputs, when an output did
+	// not have to be a key: a placeholder nobody could spend. A network that starts with the fork
+	// on never uses it (DevFeeScriptAt).
 	DevFeeScript []byte
 }
 
@@ -94,14 +98,17 @@ var (
 		DNSSeeds:   nil,
 		FixedSeeds: nil,
 		Bech32HRP:  "powm",
-		// TODO(before genesis): the real 2-of-3 multisig script of the dev fee quorum.
-		DevFeeScript: nil,
+		// TODO(before genesis): the dev fee key.
+		DevFeeKey: nil,
 		// TODO(before genesis): finality quorum keys from independent operators.
 		FinalitySigners:   nil,
 		FinalityThreshold: FinalityThreshold,
 		// A new network starts with every rule on.
 		Forks: []ForkAt{
 			{Fork: ForkWitnessCommitment, Height: 0},
+			{Fork: ForkSignedNetwork, Height: 0},
+			{Fork: ForkLockTime, Height: 0},
+			{Fork: ForkStrictOutputs, Height: 0},
 		},
 	}
 
@@ -124,6 +131,7 @@ var (
 		// they can become invalid — which is why they are only used when DNS gives nothing.
 		FixedSeeds:   []string{"2.28.131.131:17696", "37.27.149.235:17696"},
 		DevFeeScript: []byte("testnet-dev-fee-placeholder"),
+		DevFeeKey:    placeholderKey("testnet"),
 		// The testnet finality quorum: 9 keys, threshold 5 — the same numbers that will go to
 		// mainnet, so testnet exercises exactly those paths (the finality spec §4).
 		//
@@ -161,14 +169,33 @@ var (
 		WalletRPCPort:     27695,
 		Bech32HRP:         "rpowm",
 		DevFeeScript:      []byte("regtest-dev-fee"),
+		DevFeeKey:         placeholderKey("regtest"),
 		FinalitySigners:   regtestSignerKeys(),
 		FinalityThreshold: FinalityThreshold,
 		DagProfile:        mh.TestProfile,
 		Forks: []ForkAt{
 			{Fork: ForkWitnessCommitment, Height: 0},
+			{Fork: ForkSignedNetwork, Height: 0},
+			{Fork: ForkLockTime, Height: 0},
+			{Fork: ForkStrictOutputs, Height: 0},
 		},
 	}
 )
+
+// DevFeeScriptAt returns the script the dev fee output has to carry in a block at this height.
+func (p *NetParams) DevFeeScriptAt(height uint64) []byte {
+	if p.Active(ForkStrictOutputs, height) {
+		return p.DevFeeKey
+	}
+	return p.DevFeeScript
+}
+
+// placeholderKey is a dev fee "key" for a network whose coins are worth nothing: 32 bytes that
+// are a hash and not a key anybody generated, so whatever is paid there stays there.
+func placeholderKey(network string) []byte {
+	h := mh.TaggedHash("PowMachina/dev-fee-placeholder/v0", []byte(network))
+	return h[:]
+}
 
 // RegtestSignerSeed returns the seed of a quorum signer on regtest.
 //

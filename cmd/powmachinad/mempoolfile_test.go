@@ -39,7 +39,7 @@ func spend(t *testing.T, sk *[32]byte, pk []byte, op chain.Outpoint, coin chain.
 	tx := &chain.Tx{Version: 1,
 		Inputs:  []chain.TxIn{{PrevTxID: op.TxID, PrevIndex: op.Index}},
 		Outputs: []chain.TxOut{{Value: value, Script: pk}}}
-	sig, err := chain.SignInput(tx, 0, []chain.Coin{coin}, sk)
+	sig, err := chain.SignInput(tx, 0, []chain.Coin{coin}, sk, chain.RegTest.At(1))
 	if err != nil {
 		t.Fatal(err)
 	}

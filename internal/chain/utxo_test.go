@@ -20,7 +20,7 @@ func TestApplyUndoRestoresExactState(t *testing.T) {
 		Inputs:  []TxIn{{PrevTxID: prev.TxID, PrevIndex: 0}},
 		Outputs: []TxOut{{Value: 6 * POWM, Script: pk}, {Value: 3 * POWM, Script: pk}},
 	}
-	sig, err := SignInput(spend, 0, []Coin{prevCoin}, sk)
+	sig, err := SignInput(spend, 0, []Coin{prevCoin}, sk, RegTest.At(1))
 	if err != nil {
 		t.Fatal(err)
 	}

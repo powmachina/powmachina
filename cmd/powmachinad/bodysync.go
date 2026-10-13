@@ -903,6 +903,14 @@ func (n *Node) checkBodyCopy(blk *chain.Block) error {
 // onBlockApplied is what belongs to a new tip and not in storage.
 func (n *Node) onBlockApplied(b *chain.Block) {
 	n.mempool.RemoveConfirmed(b)
+	// The mempool holds what was valid for this block's height. When the next block is the
+	// first under a new rule, what is in the pool is checked against it — a transaction signed
+	// the old way would otherwise go into a template and make our own block invalid.
+	if next := uint64(b.Header.Height) + 1; n.params.RulesChangeAt(next) {
+		if dropped := n.mempool.Revalidate(n.store, next); dropped > 0 {
+			log.Printf("the rules change at height %d: %d transactions left the mempool", next, dropped)
+		}
+	}
 	// Confirmed transactions are parents for those that overtook them — their outputs are now
 	// in the UTXO set, so a child from the orphan pool will pass.
 	parents := make([][32]byte, 0, len(b.Txs))

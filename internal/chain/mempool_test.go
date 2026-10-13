@@ -19,7 +19,7 @@ func poolSetup(t *testing.T) (*Mempool, *UTXOSet, *[32]byte, []byte, Outpoint, C
 func signedSpend(t *testing.T, sk *[32]byte, op Outpoint, coin Coin, outs []TxOut) *Tx {
 	t.Helper()
 	tx := &Tx{Version: 1, Inputs: []TxIn{{PrevTxID: op.TxID, PrevIndex: op.Index}}, Outputs: outs}
-	sig, err := SignInput(tx, 0, []Coin{coin}, sk)
+	sig, err := SignInput(tx, 0, []Coin{coin}, sk, RegTest.At(1))
 	if err != nil {
 		t.Fatal(err)
 	}

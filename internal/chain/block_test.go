@@ -32,11 +32,14 @@ func coinbaseTx(height uint64, minerValue int64, params NetParams) *Tx {
 		Inputs:  []TxIn{{PrevTxID: extra, PrevIndex: CoinbaseIndex}},
 	}
 	if fee := DevFee(height); fee > 0 {
-		tx.Outputs = append(tx.Outputs, TxOut{Value: fee, Script: params.DevFeeScript})
+		tx.Outputs = append(tx.Outputs, TxOut{Value: fee, Script: params.DevFeeScriptAt(height)})
 	}
-	tx.Outputs = append(tx.Outputs, TxOut{Value: minerValue, Script: []byte("miner")})
+	tx.Outputs = append(tx.Outputs, TxOut{Value: minerValue, Script: minerKey})
 	return tx
 }
+
+// minerKey stands for a miner's payout key in these tests: an output has to be 32 bytes.
+var minerKey = []byte("a miner's key, thirty-two bytes.")
 
 func blockWith(height uint64, txs []*Tx) *Block {
 	b := &Block{
@@ -118,7 +121,7 @@ func TestCoinbaseRules(t *testing.T) {
 
 	// The dev fee is missing.
 	noFee := &Tx{Version: 1, Inputs: []TxIn{{PrevIndex: CoinbaseIndex}},
-		Outputs: []TxOut{{Value: MinerSubsidy(h), Script: []byte("miner")}}}
+		Outputs: []TxOut{{Value: MinerSubsidy(h), Script: minerKey}}}
 	if err := blockWith(h, []*Tx{noFee}).ValidateBlock(u, p); err == nil {
 		t.Fatal("a block without the dev fee output passed")
 	}
@@ -171,7 +174,7 @@ func TestSpendingRules(t *testing.T) {
 		}
 		tx.Witness = make([]Witness, len(in))
 		for i := range in {
-			sig, err := SignInput(tx, i, coins, sk)
+			sig, err := SignInput(tx, i, coins, sk, RegTest.At(1))
 			if err != nil {
 				t.Fatal(err)
 			}

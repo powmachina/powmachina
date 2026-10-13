@@ -16,8 +16,17 @@ import (
 // For now there is one mode only, the equivalent of SIGHASH_ALL. Further modes are needless surface
 // for bugs — when they are needed, they will be added through a new script version.
 
+// From ForkSignedNetwork on, the signature is also bound to **the network**: the id of the
+// network's genesis block opens the signed message, under a tag of its own. Without it a
+// signature says nothing about where it was made, and a transaction signed on one network is a
+// valid transaction on any other where the same outputs exist — which somebody else can arrange,
+// because a coinbase can be mined to pay any key at any height. The genesis id rather than the
+// network magic: it is different for every network there has ever been, a restarted testnet
+// included.
+
 const (
 	sighashTag          = "PowMachina/sighash/v0"
+	sighashNetworkTag   = "PowMachina/sighash/v1"
 	sighashPrevoutsTag  = "PowMachina/sighash-prevouts/v0"
 	sighashAmountsTag   = "PowMachina/sighash-amounts/v0"
 	sighashScriptsTag   = "PowMachina/sighash-scripts/v0"
@@ -26,8 +35,8 @@ const (
 )
 
 // SigHash computes what input `index` signs. `coins` are the outputs the transaction spends, in the
-// same order as the inputs.
-func SigHash(tx *Tx, index int, coins []Coin) [32]byte {
+// same order as the inputs, `rules` the network and the height of the block the transaction is for.
+func SigHash(tx *Tx, index int, coins []Coin, rules Rules) [32]byte {
 	var b [8]byte
 
 	prevouts := make([]byte, 0, len(tx.Inputs)*36)
@@ -73,7 +82,12 @@ func SigHash(tx *Tx, index int, coins []Coin) [32]byte {
 	hSequences := mh.TaggedHash(sighashSequencesTag, sequences)
 	hOutputs := mh.TaggedHash(sighashOutputsTag, outputs)
 
-	msg := make([]byte, 0, 4+4+32*5+4)
+	tag := sighashTag
+	msg := make([]byte, 0, 32+4+4+32*5+4)
+	if network, bound := rules.signedNetwork(); bound {
+		tag = sighashNetworkTag
+		msg = append(msg, network[:]...)
+	}
 	binary.LittleEndian.PutUint32(b[:4], tx.Version)
 	msg = append(msg, b[:4]...)
 	binary.LittleEndian.PutUint32(b[:4], tx.LockTime)
@@ -86,5 +100,18 @@ func SigHash(tx *Tx, index int, coins []Coin) [32]byte {
 	binary.LittleEndian.PutUint32(b[:4], uint32(index))
 	msg = append(msg, b[:4]...)
 
-	return mh.TaggedHash(sighashTag, msg)
+	return mh.TaggedHash(tag, msg)
+}
+
+// signedNetwork returns the genesis id a signature is bound to under these rules.
+func (r Rules) signedNetwork() ([32]byte, bool) {
+	if !r.Active(ForkSignedNetwork) {
+		return [32]byte{}, false
+	}
+	g := Genesis(r.Params)
+	if g == nil {
+		// A network with no genesis has no blocks to put a transaction into.
+		return [32]byte{}, false
+	}
+	return g.ID(), true
 }

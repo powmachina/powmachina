@@ -44,12 +44,24 @@ const (
 const (
 	// ForkWitnessCommitment: the coinbase commits to the witnesses of the block (witness.go).
 	ForkWitnessCommitment Fork = 0
+	// ForkSignedNetwork: a transaction signature is bound to the network it was made for
+	// (sighash.go).
+	ForkSignedNetwork Fork = 1
+	// ForkLockTime: a transaction's lock time is enforced and the sequence field is reserved
+	// (txrules.go).
+	ForkLockTime Fork = 2
+	// ForkStrictOutputs: an output is of a script version that is defined, and of its exact
+	// shape (txrules.go).
+	ForkStrictOutputs Fork = 3
 )
 
 // forkNames are the forks this binary knows. A fork that is not here is not signalled and its
 // bit in a header counts as unknown.
 var forkNames = map[Fork]string{
 	ForkWitnessCommitment: "witness-commitment",
+	ForkSignedNetwork:     "signed-network",
+	ForkLockTime:          "locktime",
+	ForkStrictOutputs:     "strict-outputs",
 }
 
 func (f Fork) String() string {
@@ -91,6 +103,31 @@ func (p *NetParams) ForkHeight(f Fork) (uint64, bool) {
 func (p *NetParams) Active(f Fork, height uint64) bool {
 	at, ok := p.ForkHeight(f)
 	return ok && height >= at
+}
+
+// Rules is what a transaction is checked against: a network and the height of the block the
+// transaction goes into. The same transaction can be valid under one and not under another, so
+// whoever signs or verifies has to say which.
+type Rules struct {
+	Params NetParams
+	Height uint64
+}
+
+// At returns the rules of this network for a block at the given height.
+func (p NetParams) At(height uint64) Rules { return Rules{Params: p, Height: height} }
+
+// Active says whether a fork's rule holds under these rules.
+func (r Rules) Active(f Fork) bool { return r.Params.Active(f, r.Height) }
+
+// RulesChangeAt says whether the block at this height is the first one under some fork — that
+// is, whether what was valid for the block before it may not be valid for this one.
+func (p *NetParams) RulesChangeAt(height uint64) bool {
+	for _, at := range p.Forks {
+		if at.Height == height {
+			return true
+		}
+	}
+	return false
 }
 
 // BlockVersion is the version a block mined at the given height carries: the base and one bit

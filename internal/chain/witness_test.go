@@ -19,7 +19,7 @@ func sealedSpend(t *testing.T, height uint64, params NetParams) (*UTXOSet, *Bloc
 		Inputs:  []TxIn{{PrevTxID: prev.TxID, PrevIndex: 0}},
 		Outputs: []TxOut{{Value: 9 * POWM, Script: pk}},
 	}
-	sig, err := SignInput(spend, 0, []Coin{coin}, sk)
+	sig, err := SignInput(spend, 0, []Coin{coin}, sk, params.At(height))
 	if err != nil {
 		t.Fatal(err)
 	}

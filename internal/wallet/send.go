@@ -587,7 +587,7 @@ func (w *Wallet) signLocked(tx *chain.Tx, picked []*Coin) error {
 		if !ok {
 			return ErrUnknownKey
 		}
-		sig, err := chain.SignInput(tx, i, coins, sk)
+		sig, err := chain.SignInput(tx, i, coins, sk, w.params.At(w.height+1))
 		if err != nil {
 			return err
 		}
