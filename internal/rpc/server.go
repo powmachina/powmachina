@@ -55,6 +55,8 @@ type Backend interface {
 	// LaneStats is the state of the individual lanes — difficulty, the share of blocks and an
 	// estimated hashrate. It is the one thing a generic explorer cannot show.
 	LaneStats() chain.LaneStats
+	// ForkStatus is the network's fork table and what the miners signal in the header version.
+	ForkStatus() chain.ForkStatus
 	// HashrateSeries is the hashrate over time per lane — the graph in the explorer.
 	HashrateSeries(blocks, window, points int) chain.HashrateSeries
 	Tip() (*chain.Header, uint64, [32]byte)
@@ -95,15 +97,17 @@ type Backend interface {
 
 // Template is a template for a miner or a pool.
 type Template struct {
-	Height    uint64   `json:"height"`
-	Lane      string   `json:"lane"`
-	Bits      string   `json:"bits"`
-	PrevBlock string   `json:"prev_block"`
-	MinTime   uint32   `json:"min_time"`
-	Subsidy   int64    `json:"subsidy"`
-	DevFee    int64    `json:"dev_fee"`
-	Fees      int64    `json:"fees"`
-	TxIDs     []string `json:"tx_ids"`
+	Height    uint64 `json:"height"`
+	Lane      string `json:"lane"`
+	Bits      string `json:"bits"`
+	PrevBlock string `json:"prev_block"`
+	MinTime   uint32 `json:"min_time"`
+	// Version is the header version for the block: the base and the fork signal bits.
+	Version uint32   `json:"version"`
+	Subsidy int64    `json:"subsidy"`
+	DevFee  int64    `json:"dev_fee"`
+	Fees    int64    `json:"fees"`
+	TxIDs   []string `json:"tx_ids"`
 	// Txs are the transactions in the order they go into the block after the coinbase (hex). The
 	// miner assembles the block from them itself — it builds the coinbase with its own address.
 	Txs       []string `json:"txs"`
@@ -257,6 +261,8 @@ func (s *Server) dispatch(req request) (any, error) {
 		return s.getHashrate(req.Params)
 	case "getlanestats":
 		return s.getLaneStats()
+	case "getforks":
+		return s.getForks()
 	case "getrichlist":
 		return s.getRichList(req.Params)
 	case "getaddress":
@@ -923,6 +929,41 @@ func (s *Server) getBlocks(params json.RawMessage) (any, error) {
 // with a value per algorithm and generic tools broke on it — cryptoID has shown `Difficulty ---`
 // for DGB ever since and its block list does not even have a column for the algorithm. Per-lane
 // data belongs in a method of its own, not in a reshaped old one.
+// getForks returns the consensus rules added after the genesis: the height each starts at on
+// this network and how many of the most recent blocks say their miner is ready for it.
+func (s *Server) getForks() (any, error) {
+	st := s.backend.ForkStatus()
+
+	blocks := make(map[string]int, len(mh.Lanes))
+	for _, lane := range mh.Lanes {
+		blocks[lane.String()] = st.Blocks[lane]
+	}
+	forks := make([]any, 0, len(st.Forks))
+	for _, f := range st.Forks {
+		signalling := make(map[string]int, len(mh.Lanes))
+		for _, lane := range mh.Lanes {
+			signalling[lane.String()] = f.Signalling[lane]
+		}
+		e := map[string]any{
+			"name":       f.Fork.String(),
+			"bit":        uint8(f.Fork),
+			"known":      f.Known,
+			"active":     f.Active,
+			"signalling": signalling,
+		}
+		if f.Scheduled {
+			e["height"] = f.Height
+		}
+		forks = append(forks, e)
+	}
+	return map[string]any{
+		"height":        st.TipHeight,
+		"window":        st.Window,
+		"window_blocks": blocks,
+		"forks":         forks,
+	}, nil
+}
+
 func (s *Server) getLaneStats() (any, error) {
 	st := s.backend.LaneStats()
 

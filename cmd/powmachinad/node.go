@@ -1296,7 +1296,7 @@ func (nd *Node) MineBlocks(count int) error {
 		nd.mu.Unlock()
 		cb := chain.BuildCoinbase(height+1, fees, minerKey, extra, nd.params)
 		blk := &chain.Block{
-			Header: &chain.Header{Version: 1, PrevBlock: tipID, Bits: bits,
+			Header: &chain.Header{Version: nd.params.BlockVersion(height + 1), PrevBlock: tipID, Bits: bits,
 				Height: uint32(height + 1), Lane: lane},
 			Txs: append([]*chain.Tx{cb}, selected...),
 		}

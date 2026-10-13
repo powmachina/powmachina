@@ -186,6 +186,7 @@ func (n *Node) Template(lane mh.Lane) (*rpc.Template, error) {
 		Bits:      fmt.Sprintf("%08x", bits),
 		PrevBlock: fmt.Sprintf("%x", tipID),
 		MinTime:   minTime,
+		Version:   n.params.BlockVersion(next),
 		Subsidy:   chain.Subsidy(next),
 		DevFee:    chain.DevFee(next),
 		Fees:      fees,
@@ -266,6 +267,9 @@ func (n *Node) RichList(limit int) ([]store.RichEntry, int64, error) {
 
 // LaneStats is the state of the individual lanes.
 func (n *Node) LaneStats() chain.LaneStats { return n.chain.LaneStats() }
+
+// ForkStatus implements rpc.Backend.
+func (n *Node) ForkStatus() chain.ForkStatus { return n.chain.ForkStatus() }
 
 // Coin returns an unspent output if it still exists.
 func (n *Node) Coin(op chain.Outpoint) (chain.Coin, bool) {

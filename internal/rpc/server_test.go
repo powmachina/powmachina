@@ -30,6 +30,7 @@ type fakeBackend struct {
 	rich         []store.RichEntry
 	supply       int64
 	lanes        chain.LaneStats
+	forks        chain.ForkStatus
 	coins        map[chain.Outpoint]chain.Coin
 	// sync state for getinfo; zeros mean "synced" (see SyncState)
 	syncPeers   int
@@ -86,6 +87,8 @@ func (f *fakeBackend) RichList(limit int) ([]store.RichEntry, int64, error) {
 }
 
 func (f *fakeBackend) LaneStats() chain.LaneStats { return f.lanes }
+
+func (f *fakeBackend) ForkStatus() chain.ForkStatus { return f.forks }
 
 func (f *fakeBackend) Coin(op chain.Outpoint) (chain.Coin, bool) {
 	c, ok := f.coins[op]
@@ -202,6 +205,47 @@ func TestGetInfo(t *testing.T) {
 	// The node has to report which epoch it is in.
 	if _, ok := res["epoch"]; !ok {
 		t.Fatal("getinfo has to report epoch")
+	}
+}
+
+// getforks gives the height of each rule and the signalling split by lane.
+func TestGetForks(t *testing.T) {
+	st := chain.ForkStatus{TipHeight: 300, Window: 300, Forks: []chain.ForkState{
+		{Fork: 2, Known: true, Scheduled: true, Height: 500},
+		{Fork: 9},
+	}}
+	st.Blocks[mh.LaneC], st.Blocks[mh.LaneG] = 140, 160
+	st.Forks[0].Signalling[mh.LaneC], st.Forks[0].Signalling[mh.LaneG] = 120, 30
+	st.Forks[1].Signalling[mh.LaneG] = 4
+
+	s := NewServer(&fakeBackend{height: 300, forks: st}, "")
+	res, rerr := call(t, s, "", "getforks", nil)
+	if rerr != nil {
+		t.Fatalf("getforks failed: %v", rerr.Message)
+	}
+	if res["window"].(float64) != 300 {
+		t.Fatalf("window %v, expected 300", res["window"])
+	}
+	blocks := res["window_blocks"].(map[string]any)
+	if blocks["C"].(float64) != 140 || blocks["G"].(float64) != 160 {
+		t.Fatalf("blocks per lane %v", blocks)
+	}
+	forks := res["forks"].([]any)
+	if len(forks) != 2 {
+		t.Fatalf("%d forks, expected 2", len(forks))
+	}
+	known, foreign := forks[0].(map[string]any), forks[1].(map[string]any)
+	if known["bit"].(float64) != 2 || known["known"] != true || known["active"] != false ||
+		known["height"].(float64) != 500 {
+		t.Fatalf("the scheduled fork: %v", known)
+	}
+	sig := known["signalling"].(map[string]any)
+	if sig["C"].(float64) != 120 || sig["G"].(float64) != 30 {
+		t.Fatalf("signalling %v, expected 120 C and 30 G", sig)
+	}
+	// A bit nobody gave a height has no height in the answer — zero would read as "from genesis".
+	if _, has := foreign["height"]; has || foreign["known"] != false {
+		t.Fatalf("the foreign bit: %v", foreign)
 	}
 }
 

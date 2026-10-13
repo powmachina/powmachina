@@ -33,3 +33,32 @@ func TestTemplateWithAHeightThatDoesNotFitAHeaderIsRefused(t *testing.T) {
 		}
 	}
 }
+
+// The header carries the version the node asked for: that is where the fork signal bits come
+// from. A node that does not send one gets the base version, as before.
+func TestJobCarriesTheVersionFromTheTemplate(t *testing.T) {
+	payout := make([]byte, 32)
+
+	old := template(10)
+	j, err := Build(old, payout, chain.RegTest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j.Header.Version != chain.VersionBase {
+		t.Fatalf("no version in the template: header version %#x, expected %#x", j.Header.Version, chain.VersionBase)
+	}
+
+	signalling := template(10)
+	signalling.Version = chain.VersionBase | 1<<20
+	j, err = Build(signalling, payout, chain.RegTest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j.Header.Version != signalling.Version {
+		t.Fatalf("header version %#x, the template asked for %#x", j.Header.Version, signalling.Version)
+	}
+	// The version is part of what is hashed, so the PoW input has to carry it too.
+	if got := uint32(j.PoW[0]) | uint32(j.PoW[1])<<8 | uint32(j.PoW[2])<<16 | uint32(j.PoW[3])<<24; got != signalling.Version {
+		t.Fatalf("the PoW input carries version %#x, expected %#x", got, signalling.Version)
+	}
+}

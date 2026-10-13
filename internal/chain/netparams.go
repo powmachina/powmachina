@@ -69,6 +69,9 @@ type NetParams struct {
 	// cannot slip it a cheap fake chain, because it hits the first checkpoint. Empty before the
 	// genesis; every release adds a checkpoint deep below the tip (a fixed one, not a rolling one).
 	Checkpoints []Checkpoint
+	// Forks are the consensus rules added after the genesis and the height each starts at on this
+	// network (forks.go). A rule that is not listed is not active here.
+	Forks []ForkAt
 
 	// DevFeeScript is the script the dev fee has to go to (SPEC §2.1). Before mainnet launches it
 	// is replaced with the real 2-of-3 multisig script; until then there is a placeholder here,

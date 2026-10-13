@@ -18,13 +18,16 @@ import (
 
 // Template is a block template from gettemplate.
 type Template struct {
-	Height    uint64   `json:"height"`
-	Lane      string   `json:"lane"`
-	Bits      string   `json:"bits"`
-	PrevBlock string   `json:"prev_block"`
-	MinTime   uint32   `json:"min_time"`
-	Fees      int64    `json:"fees"`
-	Txs       []string `json:"txs"`
+	Height    uint64 `json:"height"`
+	Lane      string `json:"lane"`
+	Bits      string `json:"bits"`
+	PrevBlock string `json:"prev_block"`
+	MinTime   uint32 `json:"min_time"`
+	// Version is the header version the node wants on the block (the fork signal bits). A node
+	// that does not send it gets the base version.
+	Version uint32   `json:"version"`
+	Fees    int64    `json:"fees"`
+	Txs     []string `json:"txs"`
 }
 
 // Job is work for a miner.
@@ -93,7 +96,11 @@ func Build(t *Template, payout []byte, params chain.NetParams) (*Job, error) {
 	}
 	j := &Job{Lane: lane, Height: t.Height, Epoch: chain.EpochForHeight(t.Height), Target: target,
 		BlockTarget: target, Txs: txs}
-	j.Header = chain.Header{Version: 1, Bits: bits, Height: uint32(t.Height), Lane: lane,
+	version := t.Version
+	if version == 0 {
+		version = chain.VersionBase
+	}
+	j.Header = chain.Header{Version: version, Bits: bits, Height: uint32(t.Height), Lane: lane,
 		MerkleRoot: chain.TxMerkleRoot(txs), Time: max(uint32(time.Now().Unix()), t.MinTime)}
 	copy(j.Header.PrevBlock[:], prev)
 	j.PoW = j.Header.PoWInput()

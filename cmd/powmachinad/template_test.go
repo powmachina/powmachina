@@ -182,3 +182,41 @@ func TestBestKnownHeightGrowsAfterTheHandshake(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 }
+
+// The header version is chosen by the node (it carries the fork signal bits), so it has to reach
+// the miner on every path work leaves the node by: the RPC template, the stratum template and
+// the node's own miner.
+func TestTemplateCarriesTheBlockVersion(t *testing.T) {
+	node := NewNode(chain.RegTest, chain.RegtestGenesis(), mh.TestProfile)
+	defer node.Close()
+	if err := node.MineBlocks(1); err != nil {
+		t.Fatal(err)
+	}
+	tip, height, _ := node.chain.Tip()
+	if want := node.params.BlockVersion(height); tip.Version != want {
+		t.Fatalf("the node mined version %#x at height %d, expected %#x", tip.Version, height, want)
+	}
+
+	want := node.params.BlockVersion(height + 1)
+	var checked int
+	for _, lane := range []mh.Lane{mh.LaneG, mh.LaneC} {
+		tpl, err := node.Template(lane)
+		if err != nil {
+			continue // the rotation rule blocks one lane at a time
+		}
+		if tpl.Version != want {
+			t.Fatalf("lane %s: the RPC template has version %#x, expected %#x", lane, tpl.Version, want)
+		}
+		wt, err := node.WorkTemplate(lane)
+		if err != nil {
+			t.Fatalf("lane %s: %v", lane, err)
+		}
+		if wt.Version != want {
+			t.Fatalf("lane %s: the stratum template has version %#x, expected %#x", lane, wt.Version, want)
+		}
+		checked++
+	}
+	if checked == 0 {
+		t.Fatal("no lane gave a template — the test did not test anything")
+	}
+}

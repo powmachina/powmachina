@@ -20,7 +20,7 @@ func (n *Node) WorkTemplate(lane mh.Lane) (*work.Template, error) {
 		return nil, err
 	}
 	return &work.Template{Height: t.Height, Lane: t.Lane, Bits: t.Bits, PrevBlock: t.PrevBlock,
-		MinTime: t.MinTime, Fees: t.Fees, Txs: t.Txs}, nil
+		MinTime: t.MinTime, Version: t.Version, Fees: t.Fees, Txs: t.Txs}, nil
 }
 
 // TipID implements stratum.Backend.
