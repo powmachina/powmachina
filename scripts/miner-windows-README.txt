@@ -26,6 +26,21 @@ Quick start
   powmachina-miner.exe --help
       every flag
 
+Solo mining
+-----------
+
+Solo means mining against a node of your own, and the node has to have its RPC on — it is off
+unless asked for. Start the node like this (add -testnet for testnet, where the port is 17697):
+
+  powmachinad.exe -rpc 127.0.0.1:7697 -datadir DIR
+
+Once its log says "RPC listening on 127.0.0.1:7697", start the miner and choose solo. Press
+Enter at the RPC token question unless the node was started with POWM_RPC_TOKEN set.
+
+"cannot reach the node ... connection refused" means no node is listening there: it is not
+running, or it runs without -rpc. The node inside the desktop wallet cannot be mined against;
+run powmachinad on its own, or mine to a pool.
+
 Useful flags: --gpu on|off|auto, --gpu-devices 0,2, --gpu-duty 20 (use the card 20 % of the
 time), --cpu=false (GPU only), --threads N.
 

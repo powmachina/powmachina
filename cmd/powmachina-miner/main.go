@@ -8,9 +8,11 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"strconv"
@@ -103,7 +105,7 @@ func main() {
 		client := nodeclient.New(walletcmd.DaemonAddress(params, *node), rpcToken())
 		netName, err := client.Network()
 		if err != nil {
-			die(logger, "cannot reach the node: %v", err)
+			die(logger, "cannot reach the node: %v%s", err, nodeHint(err, params))
 		}
 		if netName != params.Name {
 			die(logger, "the node runs %s, but the miner was started for %s", netName, params.Name)
@@ -238,4 +240,22 @@ func duty(percent int, logger *log.Logger) float64 {
 	}
 	logger.Printf("GPU duty %d %%: between kernel launches the miner waits, so the card stays free the rest of the time", percent)
 	return float64(percent) / 100
+}
+
+// nodeHint says what to do when nothing listens where the node should be. A node has its RPC off
+// unless it is asked for, and the one inside the desktop wallet opens it on a port of its own, so
+// "connection refused" is what a first solo start usually ends with.
+func nodeHint(err error, params chain.NetParams) string {
+	var op *net.OpError
+	if !errors.As(err, &op) || op.Op != "dial" {
+		return ""
+	}
+	network := ""
+	if params.Name != chain.MainNet.Name {
+		network = " -" + params.Name
+	}
+	return fmt.Sprintf("\n\nSolo mining needs a node with its RPC on, and a node has it off unless asked:\n\n"+
+		"    powmachinad%s -rpc 127.0.0.1:%d\n\n"+
+		"The node inside the desktop wallet cannot be mined against — run powmachinad on its own,\n"+
+		"or mine to a pool with --pool.", network, params.RPCPort)
 }
