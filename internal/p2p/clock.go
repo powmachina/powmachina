@@ -8,7 +8,7 @@ import (
 
 // The machine's clock against the network.
 //
-// Consensus follows the **local** clock (`MaxFutureDrift` is 120 s) and that is how it should stay:
+// Consensus follows the **local** clock (`MaxFutureDriftStrict` is 30 s) and that is how it should stay:
 // if the time validation went by depended on the peers, the network could be shifted by whoever you
 // connect to it. The time from the handshake is therefore only **diagnostics** — but important ones:
 // a machine whose clock is two minutes off will not give its blocks to the network (it rejects them)
@@ -21,8 +21,8 @@ const (
 	// ClockSamples is how many of the most recent peers go into the median.
 	ClockSamples = 64
 	// ClockWarnSkew is the offset from which the operator is told.
-	// 60 s is half of MaxFutureDrift — nothing is on fire yet, but it is time to act.
-	ClockWarnSkew = 60 * time.Second
+	// 15 s is half of what consensus allows — nothing is on fire yet, but it is time to act.
+	ClockWarnSkew = 15 * time.Second
 	// ClockMinSamples is how many peers are needed for the median to make sense.
 	ClockMinSamples = 5
 )

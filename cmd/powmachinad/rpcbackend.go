@@ -176,8 +176,8 @@ func (n *Node) Template(lane mh.Lane) (*rpc.Template, error) {
 		raws = append(raws, fmt.Sprintf("%x", tx.Serialize()))
 	}
 
-	minTime := n.chain.MedianTimePast() + 1
-	if tip.Time >= minTime {
+	minTime := n.chain.MinTime()
+	if !n.params.Active(chain.ForkLaneDifficulty, next) && tip.Time >= minTime {
 		minTime = tip.Time + 1
 	}
 	return &rpc.Template{

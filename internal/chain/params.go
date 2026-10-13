@@ -65,8 +65,13 @@ const (
 	LwmaWindow = 60
 	// MedianTimeSpan is the number of blocks for the median time past.
 	MedianTimeSpan = 11
-	// MaxFutureDrift is how far into the future a block timestamp may go.
+	// MaxFutureDrift is how far into the future a block timestamp could go before
+	// ForkLaneDifficulty.
 	MaxFutureDrift = 120 * time.Second
+	// MaxFutureDriftStrict is the bound from ForkLaneDifficulty on (NetParams.FutureDrift). The
+	// lane rotation relief and the lane retarget are both measured in block times, so whatever a
+	// miner may add to its clock it may take off the relief; NTP keeps a machine within a second.
+	MaxFutureDriftStrict = 30 * time.Second
 
 	// MaxSameLaneRun is the lane rotation rule: at most two blocks of the same lane in a row.
 	MaxSameLaneRun = 2

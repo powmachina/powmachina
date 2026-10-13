@@ -45,9 +45,10 @@ func LaneAllowed(recent []mh.Lane, lane mh.Lane) bool {
 // the local clock here would make the same block valid for one node and invalid for
 // another, and historical validation would always see the relief.
 //
-// Faking the gap buys an attacker little: a block's time must exceed MTP and may not be
-// more than MaxFutureDrift ahead of the real clock, so a claimed 15-minute gap has to be
-// mostly real.
+// Faking the gap buys an attacker little: from ForkLaneDifficulty on a block is not dated
+// before its parent and at most 30 s ahead of the real clock, so of a claimed 15-minute gap at
+// least 870 s are real. (Before the fork the bounds were the median time past and 120 s, and
+// most of the gap could be made up.)
 func LaneAllowedAt(recent []mh.Lane, lane mh.Lane, blockTime, parentTime time.Time) bool {
 	if blockTime.Sub(parentTime) > LaneRotationRelief {
 		return true

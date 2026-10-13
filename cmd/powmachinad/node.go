@@ -1057,10 +1057,10 @@ func addrOf(p *p2p.Peer) string { return p.Addr.String() }
 // notePeerClock records the time from the handshake and says so now and then when the
 // machine's clock is off.
 //
-// Why it is worth a line in the log: `MaxFutureDrift` is 120 s and is measured against the
-// **local** clock. A machine two minutes ahead produces blocks the network rejects; two
-// minutes behind, it rejects foreign blocks as "too far in the future". From the outside that
-// looks like a network outage.
+// Why it is worth a line in the log: the allowed drift (NetParams.FutureDrift, 30 s) is measured
+// against the **local** clock. A machine half a minute ahead produces blocks the network
+// rejects; half a minute behind, it rejects foreign blocks as "too far in the future". From the
+// outside that looks like a network outage.
 func (n *Node) notePeerClock(remote *p2p.VersionMsg) {
 	n.clock.Add(remote.Timestamp, time.Now())
 	skew, off := n.clock.Off()
@@ -1071,9 +1071,10 @@ func (n *Node) notePeerClock(remote *p2p.VersionMsg) {
 	warn := n.clockLog.Take(1, time.Now())
 	n.mu.Unlock()
 	if warn {
+		_, height, _ := n.chain.Tip()
 		log.Printf("⚠ this machine's clock is %v off the network (median of the peers). "+
 			"Above %v the network starts rejecting your blocks and you theirs — check NTP.",
-			skew.Round(time.Second), chain.MaxFutureDrift)
+			skew.Round(time.Second), n.params.FutureDrift(height+1))
 	}
 }
 
@@ -1307,13 +1308,12 @@ func (nd *Node) MineBlocks(count int) error {
 		}
 		h := blk.Header
 		h.MerkleRoot = chain.TxMerkleRoot(blk.Txs)
-		// Consensus only demands a time **above the median time past** (the parent's time is
-		// not a bound, same as in Bitcoin). Moving above the parent's time would send the chain
-		// into the future while mining fast on regtest: +1 s per block, so 158 blocks mined
-		// within a second would cross MaxFutureDrift and the node would reject its own block.
+		// The clock, or the earliest time the chain allows when blocks come faster than it. The
+		// bound is never above the parent's time, so mining hundreds of blocks within a second
+		// on regtest does not walk the chain into the future and past the allowed drift.
 		h.Time = uint32(time.Now().Unix())
-		if mtp := nd.chain.MedianTimePast(); h.Time <= mtp {
-			h.Time = mtp + 1
+		if low := nd.chain.MinTime(); h.Time < low {
+			h.Time = low
 		}
 
 		mined := false

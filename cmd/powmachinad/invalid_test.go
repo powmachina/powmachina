@@ -53,8 +53,8 @@ func mineBlockWith(t *testing.T, src *Node, txs []*chain.Tx) *chain.Block {
 	h := blk.Header
 	h.MerkleRoot = chain.TxMerkleRoot(blk.Txs)
 	h.Time = uint32(time.Now().Unix())
-	if mtp := src.chain.MedianTimePast(); h.Time <= mtp {
-		h.Time = mtp + 1
+	if low := src.chain.MinTime(); h.Time < low {
+		h.Time = low
 	}
 	if h.Time <= tip.Time {
 		h.Time = tip.Time + 1

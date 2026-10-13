@@ -109,6 +109,7 @@ var (
 			{Fork: ForkSignedNetwork, Height: 0},
 			{Fork: ForkLockTime, Height: 0},
 			{Fork: ForkStrictOutputs, Height: 0},
+			{Fork: ForkLaneDifficulty, Height: 0},
 		},
 	}
 
@@ -178,6 +179,7 @@ var (
 			{Fork: ForkSignedNetwork, Height: 0},
 			{Fork: ForkLockTime, Height: 0},
 			{Fork: ForkStrictOutputs, Height: 0},
+			{Fork: ForkLaneDifficulty, Height: 0},
 		},
 	}
 )

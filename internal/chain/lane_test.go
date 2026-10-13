@@ -188,6 +188,13 @@ func TestGenesisLaneDoesNotCountToRotation(t *testing.T) {
 		t.Fatalf("test assumption: the genesis is lane C, it is %s", g.Lane)
 	}
 	hc := NewHeaderChain(RegTest, g, nil)
+	bits := func() uint32 {
+		b, err := hc.NextBitsFor(mh.LaneC)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
 
 	// The first block in the same lane as the genesis has to pass…
 	h1 := &Header{Version: 1, PrevBlock: g.ID(), Bits: g.Bits, Height: 1,
@@ -196,13 +203,13 @@ func TestGenesisLaneDoesNotCountToRotation(t *testing.T) {
 		t.Fatalf("block 1 in the genesis lane: ok=%v, %v", ok, err)
 	}
 	// …and so does the second, because the genesis does not count.
-	h2 := &Header{Version: 1, PrevBlock: h1.ID(), Bits: g.Bits, Height: 2,
+	h2 := &Header{Version: 1, PrevBlock: h1.ID(), Bits: bits(), Height: 2,
 		Time: h1.Time + 60, Lane: mh.LaneC, Nonce: 2}
 	if ok, err := hc.AddHeader(h2, acceptPoW{}); err != nil || !ok {
 		t.Fatalf("block 2 in the genesis lane: ok=%v, %v", ok, err)
 	}
 	// The third no longer does — the rule applies normally.
-	h3 := &Header{Version: 1, PrevBlock: h2.ID(), Bits: g.Bits, Height: 3,
+	h3 := &Header{Version: 1, PrevBlock: h2.ID(), Bits: bits(), Height: 3,
 		Time: h2.Time + 60, Lane: mh.LaneC, Nonce: 3}
 	if _, err := hc.AddHeader(h3, acceptPoW{}); !errors.Is(err, ErrLaneNotAllowed) {
 		t.Fatalf("a third block of the same lane: %v, expected ErrLaneNotAllowed", err)

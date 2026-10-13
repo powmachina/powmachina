@@ -47,8 +47,8 @@ func mineNext(t *testing.T, hc *chain.HeaderChain, lane mh.Lane,
 		Version: 1, PrevBlock: tipID, Time: tipHeader.Time + 130,
 		Bits: bits, Height: uint32(height + 1), Lane: lane,
 	}
-	if mtp := hc.MedianTimePast(); h.Time <= mtp {
-		h.Time = mtp + 1
+	if low := hc.MinTime(); h.Time < low {
+		h.Time = low
 	}
 	for nonce := uint64(0); nonce < 200_000; nonce++ {
 		h.Nonce = nonce
@@ -205,8 +205,12 @@ func TestHeaderValidationRejectsCheating(t *testing.T) {
 	tip, height, tipID := hc.Tip()
 
 	// A third block of the same lane in a row is invalid.
+	bits, err := hc.NextBitsFor(mh.LaneG)
+	if err != nil {
+		t.Fatal(err)
+	}
 	third := &chain.Header{Version: 1, PrevBlock: tipID, Time: tip.Time + 130,
-		Bits: chain.RegtestTargetBits, Height: uint32(height + 1), Lane: mh.LaneG}
+		Bits: bits, Height: uint32(height + 1), Lane: mh.LaneG}
 	found := false
 	for nonce := uint64(0); nonce < 200_000; nonce++ {
 		third.Nonce = nonce

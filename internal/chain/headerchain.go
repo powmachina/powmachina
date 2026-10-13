@@ -39,6 +39,22 @@ type node struct {
 	id     [32]byte
 	work   *big.Int // cumulative normalized chainwork
 	height uint64
+	// lastOf is the most recent block of each lane at or below this one, the genesis not counted;
+	// first is this branch's block at height 1. The lane retarget reads them (asert.go) — without
+	// them it would walk back through the whole chain for a lane that has not mined for a while.
+	lastOf [len(mh.Lanes)]*node
+	first  *node
+}
+
+// link fills in what a node inherits from its parent. Every node but the genesis goes through it.
+func (n *node) link(parent *node) {
+	n.lastOf, n.first = parent.lastOf, parent.first
+	if n.first == nil {
+		n.first = n
+	}
+	if int(n.header.Lane) < len(n.lastOf) {
+		n.lastOf[n.header.Lane] = n
+	}
 }
 
 // HeaderChain is safe for concurrent use.
@@ -242,11 +258,10 @@ func (hc *HeaderChain) checkLocked(h *Header, id [32]byte) (*node, error) {
 			return nil, ErrForkTooDeep
 		}
 	}
-	mtp := hc.medianTimePastLocked(parent)
-	if h.Time <= mtp {
+	if h.Time < hc.minTimeLocked(parent) {
 		return nil, ErrTimeTooOld
 	}
-	if int64(h.Time) > hc.now().Add(MaxFutureDrift).Unix() {
+	if int64(h.Time) > hc.now().Add(hc.params.FutureDrift(uint64(h.Height))).Unix() {
 		return nil, ErrTimeTooNew
 	}
 	wantBits, err := hc.nextBitsLocked(parent, h.Lane)
@@ -292,6 +307,7 @@ func (hc *HeaderChain) AddHeader(h *Header, pow PoWChecker) (bool, error) {
 		return false, err
 	}
 	n := &node{header: h, id: id, work: new(big.Int).Add(parent.work, work), height: uint64(h.Height)}
+	n.link(parent)
 	hc.byID[id] = n
 
 	// Extending the active branch.
@@ -411,6 +427,9 @@ func (hc *HeaderChain) recentLanesLocked(from *node, count int) []mh.Lane {
 
 // nextBitsLocked computes the expected difficulty for a given lane on top of a given predecessor.
 func (hc *HeaderChain) nextBitsLocked(parent *node, lane mh.Lane) (uint32, error) {
+	if hc.params.Active(ForkLaneDifficulty, parent.height+1) {
+		return hc.asertBitsLocked(parent, lane)
+	}
 	window := make([]LaneBlock, 0, LwmaWindow+1)
 	for n := parent; n != nil && len(window) < LwmaWindow+1; n = hc.byID[n.header.PrevBlock] {
 		if n.header.Lane == lane {
@@ -475,11 +494,28 @@ func (hc *HeaderChain) NextBitsFor(lane mh.Lane) (uint32, error) {
 	return hc.nextBitsLocked(hc.tip, lane)
 }
 
-// MedianTimePast returns the MTP over the current tip — the lower bound for the next block's time.
-func (hc *HeaderChain) MedianTimePast() uint32 {
+// MinTime returns the earliest time the next block may carry.
+func (hc *HeaderChain) MinTime() uint32 {
 	hc.mu.RLock()
 	defer hc.mu.RUnlock()
-	return hc.medianTimePastLocked(hc.tip)
+	return hc.minTimeLocked(hc.tip)
+}
+
+// minTimeLocked is the earliest time a block on top of `parent` may carry.
+//
+// From ForkLaneDifficulty on it is the parent's time: a block is never dated before the one it
+// builds on. Before the fork the bound was the median of the last eleven blocks, which trails the
+// tip by about six of them — a miner could date a block twelve minutes back, the block after it
+// then looked twelve minutes late, and the lane's difficulty fell. A third of a lane doing that
+// ran the lane 40 % faster than its hashrate allowed (cmd/powm-diffsim, scenario "backdate").
+//
+// The same time as the parent's is allowed. A strict bound would push a chain mined faster than
+// one block a second (regtest) into the future by a second per block, and past FutureDrift.
+func (hc *HeaderChain) minTimeLocked(parent *node) uint32 {
+	if hc.params.Active(ForkLaneDifficulty, parent.height+1) {
+		return parent.header.Time
+	}
+	return hc.medianTimePastLocked(parent) + 1
 }
 
 // AllowedLanesNow returns the lanes a block may be built for right now (the lane rotation rule).
@@ -597,6 +633,7 @@ func (hc *HeaderChain) LoadHeader(h *Header) error {
 		return err
 	}
 	n := &node{header: h, id: id, work: new(big.Int).Add(parent.work, w), height: uint64(h.Height)}
+	n.link(parent)
 	hc.byID[id] = n
 	if n.work.Cmp(hc.tip.work) > 0 {
 		hc.tip = n

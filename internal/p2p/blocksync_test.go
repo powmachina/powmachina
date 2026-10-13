@@ -28,8 +28,8 @@ func mineFullBlock(t *testing.T, hc *chain.HeaderChain, u *chain.UTXOSet, lane m
 			Height: uint32(height + 1), Lane: lane, Time: tip.Time + 130},
 		Txs: []*chain.Tx{cb},
 	}
-	if mtp := hc.MedianTimePast(); blk.Header.Time <= mtp {
-		blk.Header.Time = mtp + 1
+	if low := hc.MinTime(); blk.Header.Time < low {
+		blk.Header.Time = low
 	}
 	chain.SealCoinbase(blk.Txs, height+1, params)
 	blk.Header.MerkleRoot = chain.TxMerkleRoot(blk.Txs)

@@ -317,8 +317,8 @@ func (s *Server) getInfo() (any, error) {
 		"allowed_lanes":  lanes,
 		"epoch":          mh.EpochForHeight(height),
 		"randomx_hw_aes": mh.HasHardwareAES(),
-		// time_offset_s: how far this machine's clock is from the network. Beyond ±120 s
-		// (MaxFutureDrift) the network stops understanding it.
+		// time_offset_s: how far this machine's clock is from the network. Beyond ±30 s
+		// (MaxFutureDriftStrict) the network stops understanding it.
 		"time_offset_s":  int64(skew / time.Second),
 		"time_peers":     samples,
 		"randomx_jit_wx": mh.JITIsSecure(),

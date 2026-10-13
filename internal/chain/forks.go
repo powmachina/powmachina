@@ -3,6 +3,7 @@ package chain
 import (
 	"fmt"
 	"sort"
+	"time"
 
 	"powmachina/internal/mh"
 )
@@ -53,6 +54,9 @@ const (
 	// ForkStrictOutputs: an output is of a script version that is defined, and of its exact
 	// shape (txrules.go).
 	ForkStrictOutputs Fork = 3
+	// ForkLaneDifficulty: a lane's difficulty follows the clock of the whole chain (asert.go), a
+	// block is not dated before its parent and at most MaxFutureDriftStrict ahead of the clock.
+	ForkLaneDifficulty Fork = 4
 )
 
 // forkNames are the forks this binary knows. A fork that is not here is not signalled and its
@@ -62,6 +66,7 @@ var forkNames = map[Fork]string{
 	ForkSignedNetwork:     "signed-network",
 	ForkLockTime:          "locktime",
 	ForkStrictOutputs:     "strict-outputs",
+	ForkLaneDifficulty:    "lane-difficulty",
 }
 
 func (f Fork) String() string {
@@ -232,4 +237,12 @@ func (hc *HeaderChain) ForkStatus() ForkStatus {
 		}
 	}
 	return out
+}
+
+// FutureDrift is how far ahead of the local clock the time of a block at this height may be.
+func (p *NetParams) FutureDrift(height uint64) time.Duration {
+	if p.Active(ForkLaneDifficulty, height) {
+		return MaxFutureDriftStrict
+	}
+	return MaxFutureDrift
 }
