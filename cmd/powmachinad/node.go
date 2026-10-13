@@ -1300,6 +1300,7 @@ func (nd *Node) MineBlocks(count int) error {
 				Height: uint32(height + 1), Lane: lane},
 			Txs: append([]*chain.Tx{cb}, selected...),
 		}
+		chain.SealCoinbase(blk.Txs, height+1, nd.params)
 		pow, err := nd.pow(height + 1)
 		if err != nil {
 			return err

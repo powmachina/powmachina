@@ -99,6 +99,10 @@ var (
 		// TODO(before genesis): finality quorum keys from independent operators.
 		FinalitySigners:   nil,
 		FinalityThreshold: FinalityThreshold,
+		// A new network starts with every rule on.
+		Forks: []ForkAt{
+			{Fork: ForkWitnessCommitment, Height: 0},
+		},
 	}
 
 	TestNet = NetParams{
@@ -160,6 +164,9 @@ var (
 		FinalitySigners:   regtestSignerKeys(),
 		FinalityThreshold: FinalityThreshold,
 		DagProfile:        mh.TestProfile,
+		Forks: []ForkAt{
+			{Fork: ForkWitnessCommitment, Height: 0},
+		},
 	}
 )
 

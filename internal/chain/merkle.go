@@ -52,10 +52,16 @@ func TxMerkleRoot(txs []*Tx) [32]byte {
 	return MerkleRoot(ids)
 }
 
-// WitnessMerkleRoot covers the signatures; the commitment to it belongs in the coinbase's data output.
+// WitnessMerkleRoot covers the signatures; the commitment to it sits in the coinbase (witness.go).
+//
+// The coinbase's own leaf is all zeros: the commitment is one of its outputs, so its id cannot
+// be part of what the commitment covers. Nothing is lost by that — a coinbase has no witness.
 func WitnessMerkleRoot(txs []*Tx) [32]byte {
 	ids := make([][32]byte, len(txs))
 	for i, t := range txs {
+		if i == 0 {
+			continue
+		}
 		ids[i] = t.WTxID()
 	}
 	return MerkleRoot(ids)

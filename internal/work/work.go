@@ -90,6 +90,7 @@ func Build(t *Template, payout []byte, params chain.NetParams) (*Job, error) {
 		}
 		txs = append(txs, tx)
 	}
+	chain.SealCoinbase(txs, t.Height, params)
 	lane := mh.LaneC
 	if t.Lane == "G" {
 		lane = mh.LaneG

@@ -595,7 +595,9 @@ func (n *Node) ApplyReadyBodies() error {
 		if view.err != nil {
 			return fmt.Errorf("reading the UTXO set: %w", view.err)
 		}
-		if committed == nil {
+		// Where the coinbase commits to the witnesses and this body matches it, the witnesses
+		// are the miner's own: the failure is the block's.
+		if committed == nil && !failed.WitnessesCommitted(n.params) {
 			return n.dropBadCopyLocked(failed, err)
 		}
 		if ierr := n.invalidateBranchLocked(failed, err); ierr != nil {
@@ -868,6 +870,15 @@ func (n *Node) storeBody(peer *p2p.Peer, blk *chain.Block) error {
 		n.peers.Misbehaving(peer, p2p.MisbehaviorInvalidBlock)
 		return err
 	}
+	if err := n.checkBodyCopy(blk); err != nil {
+		// The witnesses are not the ones the block commits to. A node only hands out bodies it
+		// has applied, and it would not have stored this one — so the peer made it.
+		n.bodies.badBody()
+		log.Printf("⚠ the body for height %d from %s is not the block's: %v",
+			blk.Header.Height, addrOf(peer), err)
+		n.peers.Misbehaving(peer, p2p.MisbehaviorInvalidBlock)
+		return err
+	}
 	if err := n.store.PutBlock(blk); err != nil {
 		return err
 	}
@@ -875,6 +886,16 @@ func (n *Node) storeBody(peer *p2p.Peer, blk *chain.Block) error {
 	n.bodies.deliveredBy(id, peer)
 	if n.chain.IsParked(id) {
 		n.unparkBlock(id)
+	}
+	return nil
+}
+
+// checkBodyCopy refuses a body whose witnesses are not the ones its coinbase commits to. It is
+// about the copy only: a block with no commitment at all is invalid, and saying so is
+// validation's job — it marks the block, this only turns a body away.
+func (n *Node) checkBodyCopy(blk *chain.Block) error {
+	if err := blk.CheckWitnesses(n.params); errors.Is(err, chain.ErrBadWitnessCommitment) {
+		return err
 	}
 	return nil
 }

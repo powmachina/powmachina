@@ -79,23 +79,47 @@ func TestForkTablesAreWellFormed(t *testing.T) {
 	}
 }
 
-// With no fork known the version is the plain base: the blocks of today stay what they were.
-func TestBlockVersionWithoutForksIsTheBase(t *testing.T) {
+// A network where every known rule already holds mines the plain base version; one that has a
+// rule still ahead of it — or has not been given a height for it — signals it.
+func TestBlockVersionOfTheNetworks(t *testing.T) {
 	for _, p := range []NetParams{MainNet, TestNet, RegTest} {
-		if v := p.BlockVersion(1); v != VersionBase {
-			t.Fatalf("%s: version %#x, expected %#x", p.Name, v, VersionBase)
+		want := VersionBase
+		for _, f := range KnownForks() {
+			if !p.Active(f, 1) {
+				want |= 1 << (versionSignalShift + uint32(f))
+			}
+		}
+		if v := p.BlockVersion(1); v != want {
+			t.Fatalf("%s: version %#x, expected %#x", p.Name, v, want)
 		}
 	}
+	// A new network starts with every rule on, so there is nothing for it to signal.
+	for _, p := range []NetParams{MainNet, RegTest} {
+		if v := p.BlockVersion(1); v != VersionBase {
+			t.Fatalf("%s: version %#x at height 1, expected the plain base", p.Name, v)
+		}
+	}
+}
+
+// bare is regtest with an empty fork table and nothing but the test's own fork to look at.
+func bare(t *testing.T) NetParams {
+	t.Helper()
+	real := forkNames
+	forkNames = map[Fork]string{}
+	t.Cleanup(func() { forkNames = real })
+	p := RegTest
+	p.Forks = nil
+	return p
 }
 
 // A known fork is signalled until it is active — also when the network has no height for it yet,
 // because the signalling is what a height is chosen by.
 func TestBlockVersionSignalsUntilActive(t *testing.T) {
 	const f Fork = 5
+	p := bare(t)
 	knowFork(t, f, "test-rule")
 	bit := uint32(1) << (versionSignalShift + uint32(f))
 
-	p := RegTest
 	if v := p.BlockVersion(1); v != VersionBase|bit {
 		t.Fatalf("no height yet: version %#x, expected the bit set", v)
 	}
@@ -121,8 +145,8 @@ func TestBlockVersionSignalsUntilActive(t *testing.T) {
 // when all of them come from one.
 func TestForkStatusCountsPerLane(t *testing.T) {
 	const known, foreign Fork = 2, 9
+	p := bare(t)
 	knowFork(t, known, "test-rule")
-	p := RegTest
 	p.Forks = []ForkAt{{Fork: known, Height: 1000}}
 
 	ready := VersionBase | 1<<(versionSignalShift+uint32(known))
@@ -168,8 +192,8 @@ func TestForkStatusCountsPerLane(t *testing.T) {
 // miner is about to build.
 func TestForkStatusActiveIsForTheNextBlock(t *testing.T) {
 	const f Fork = 1
+	p := bare(t)
 	knowFork(t, f, "test-rule")
-	p := RegTest
 	p.Forks = []ForkAt{{Fork: f, Height: 4}}
 
 	lanes := []mh.Lane{mh.LaneC, mh.LaneG, mh.LaneC}
@@ -191,7 +215,7 @@ func TestForkStatusWindowIsBounded(t *testing.T) {
 	for i := range lanes {
 		lanes[i], versions[i] = mh.Lane(i%2), VersionBase
 	}
-	st := buildVersions(t, RegTest, lanes, versions).ForkStatus()
+	st := buildVersions(t, bare(t), lanes, versions).ForkStatus()
 	if st.Window != SignalWindow {
 		t.Fatalf("window %d, expected %d", st.Window, SignalWindow)
 	}

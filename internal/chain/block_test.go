@@ -44,6 +44,7 @@ func blockWith(height uint64, txs []*Tx) *Block {
 			Time: 1_700_000_500},
 		Txs: txs,
 	}
+	SealCoinbase(txs, height, RegTest)
 	b.Header.MerkleRoot = TxMerkleRoot(txs)
 	return b
 }

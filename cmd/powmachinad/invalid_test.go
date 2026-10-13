@@ -45,6 +45,7 @@ func mineBlockWith(t *testing.T, src *Node, txs []*chain.Tx) *chain.Block {
 			Height: uint32(height + 1), Lane: lane},
 		Txs: append([]*chain.Tx{cb}, txs...),
 	}
+	chain.SealCoinbase(blk.Txs, height+1, src.params)
 	pow, err := src.pow(height + 1)
 	if err != nil {
 		t.Fatal(err)

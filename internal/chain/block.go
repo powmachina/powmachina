@@ -171,6 +171,19 @@ func (b *Block) validate(u CoinView, params NetParams, signatures bool) error {
 	if b.Header.MerkleRoot != TxMerkleRoot(b.Txs) {
 		return ErrBadMerkle
 	}
+	if params.Active(ForkWitnessCommitment, height) {
+		// That the commitment is there is a property of the block. Whether the witnesses match it
+		// is a property of this copy — and ValidateCommitted has taken them out.
+		want, err := b.witnessCommitment()
+		if err != nil {
+			return err
+		}
+		if signatures {
+			if err := b.checkWitnessesAgainst(want); err != nil {
+				return err
+			}
+		}
+	}
 	return b.checkCoinbase(height, totalFees, params)
 }
 
@@ -306,4 +319,21 @@ func BuildCoinbase(height uint64, fees int64, minerScript []byte, extra [32]byte
 		tx.Outputs = append(tx.Outputs, TxOut{Value: 0, ScriptVersion: ScriptVersionData})
 	}
 	return tx
+}
+
+// SealCoinbase finishes a block's transaction list: where the rule holds, it writes the witness
+// commitment into the coinbase (txs[0]). It has to be called once the list is final and before
+// the merkle root is computed — the commitment is an output, so it changes the coinbase's txid.
+func SealCoinbase(txs []*Tx, height uint64, params NetParams) {
+	if len(txs) == 0 || !params.Active(ForkWitnessCommitment, height) {
+		return
+	}
+	cb := txs[0]
+	out := TxOut{ScriptVersion: ScriptVersionData, Script: witnessCommitmentScript(WitnessMerkleRoot(txs))}
+	// A transaction may have one data output, so one that is already there is taken over.
+	if n := len(cb.Outputs); n > 0 && cb.Outputs[n-1].ScriptVersion == ScriptVersionData {
+		cb.Outputs[n-1] = out
+		return
+	}
+	cb.Outputs = append(cb.Outputs, out)
 }

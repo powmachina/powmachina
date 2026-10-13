@@ -106,7 +106,9 @@ func TestMinerOverStratum(t *testing.T) {
 	close(quit)
 	<-done
 	for i, b := range node.blocks[:3] {
-		if string(b.Txs[0].Outputs[len(b.Txs[0].Outputs)-1].Script) != string(k) {
+		// The last output is the witness commitment; the miner's is the one before it.
+		outs := b.Txs[0].Outputs
+		if len(outs) < 2 || string(outs[len(outs)-2].Script) != string(k) {
 			t.Fatalf("the block %d does not pay the address from the login", i)
 		}
 	}

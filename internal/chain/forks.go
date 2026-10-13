@@ -41,9 +41,16 @@ const (
 	SignalWindow = 1000
 )
 
+const (
+	// ForkWitnessCommitment: the coinbase commits to the witnesses of the block (witness.go).
+	ForkWitnessCommitment Fork = 0
+)
+
 // forkNames are the forks this binary knows. A fork that is not here is not signalled and its
 // bit in a header counts as unknown.
-var forkNames = map[Fork]string{}
+var forkNames = map[Fork]string{
+	ForkWitnessCommitment: "witness-commitment",
+}
 
 func (f Fork) String() string {
 	if name, ok := forkNames[f]; ok {

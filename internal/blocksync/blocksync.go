@@ -99,6 +99,10 @@ type Downloader struct {
 	MaxFailures int
 	// Timeout per batch.
 	Timeout time.Duration
+	// Check is one more test of a body before it is stored, on top of VerifyBody — what the
+	// network's rules let a node say about a body without a UTXO set. A body that fails it is a
+	// lie of the source like any other.
+	Check func(b *chain.Block) error
 }
 
 func New() *Downloader {
@@ -256,6 +260,12 @@ func (d *Downloader) fetchBatch(ctx context.Context, w *worker, batch []Job, sin
 		}
 		if err := VerifyBody(b, id); err != nil {
 			return d.compact(batch, stored), err
+		}
+		if d.Check != nil {
+			if err := d.Check(b); err != nil {
+				return d.compact(batch, stored), fmt.Errorf("%w: %s sent block %x: %v",
+					ErrBadBlock, w.src.Name(), id[:6], err)
+			}
 		}
 		if err := sink.PutBlock(b); err != nil {
 			return d.compact(batch, stored), err

@@ -96,6 +96,7 @@ func (n *Node) bulkFetch(ctx context.Context, conn *p2p.Conn, peerName string, u
 	}
 
 	d := blocksync.New()
+	d.Check = n.checkBodyCopy
 	start := time.Now()
 	st, err := d.Run(ctx, jobs, sources, n.store)
 	if err != nil {
