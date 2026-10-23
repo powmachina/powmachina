@@ -441,7 +441,7 @@ func TestSharedHeaderAndTabs(t *testing.T) {
 		body := get(t, h, path).Body.String()
 		for _, want := range []string{
 			`href="/site-header.css"`, `class="site-header"`,
-			`>How it works</a>`, `>Explorer</a>`, `href="https://pool.powmachina.com/" rel="noopener">Pool</a>`, `>Wallet</a>`, `Whitepaper<i>soon</i>`, `href="/download/">Download</a>`,
+			`>How it works</a>`, `>Explorer</a>`, `href="/sharepool/">Share Pool</a>`, `>Wallet</a>`, `Whitepaper<i>soon</i>`, `href="/download/">Download</a>`,
 			`data-set-theme="dark"`,
 		} {
 			if !strings.Contains(body, want) {
@@ -682,5 +682,56 @@ func TestSharesAndMinerIcons(t *testing.T) {
 	defer light.Close()
 	if body := get(t, newTestServer(t, light), "/explorer/shares").Body.String(); !strings.Contains(body, "without the full DAG") {
 		t.Error("a light node's empty pool is not explained")
+	}
+}
+
+// The live API carries the pool and the last blocks with their payees and icons, as JSON, and
+// answers from its cache within liveTTL.
+func TestLiveSharepoolAPI(t *testing.T) {
+	a, _ := address.Encode("rpowm", 0, make([]byte, 32))
+	tally := map[string]any{"shares": 3, "units": 2000, "miner_count": 1, "miners": []any{
+		map[string]any{"address": a, "shares": 3, "units": 2000},
+	}}
+	pool := map[string]any{"takes_shares": true}
+	for k, v := range tally {
+		pool[k] = v
+	}
+	blocks := map[string]any{"height": 25, "blocks": []any{
+		map[string]any{"id": strings.Repeat("a", 64), "height": 25, "lane": "G", "time": time.Now().Unix(),
+			"bits": "2000ffff", "tx_count": 1, "size": 218, "payout": a, "shares": 3},
+	}}
+	block := map[string]any{"id": strings.Repeat("a", 64), "height": 25, "lane": "G", "time": time.Now().Unix(),
+		"bits": "2000ffff", "txs": []string{}, "payout": a, "share_weight": 11, "settlement": tally}
+	node := fakeNode(t, map[string]any{"getsharepool": pool, "getblocks": blocks, "getblock": block})
+	defer node.Close()
+	h := newTestServer(t, node)
+
+	rec := get(t, h, "/explorer/api/sharepool")
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("content type %q", ct)
+	}
+	var live Live
+	if err := json.Unmarshal(rec.Body.Bytes(), &live); err != nil {
+		t.Fatal(err)
+	}
+	want := liveIcon(a)
+	if !live.TakesShares || live.Pool.Units != 2000 || len(live.Pool.Miners) != 1 || live.Pool.Miners[0].Icon != want {
+		t.Fatalf("the pool: %+v", live.Pool)
+	}
+	if len(live.Blocks) != 1 || live.Blocks[0].Closer == nil || live.Blocks[0].Paid.Units != 2000 || live.Blocks[0].Algo == "" {
+		t.Fatalf("the blocks: %+v", live.Blocks)
+	}
+	ic := iconOf(a)
+	for row := range 5 {
+		for col := range 5 {
+			if ic.Cells[row][col] != (want.Cells&(1<<(row*5+col)) != 0) {
+				t.Fatalf("cell %d,%d differs from the icon", row, col)
+			}
+		}
+	}
+	// The second answer within the TTL is the same bytes, without asking the node.
+	node.Close()
+	if again := get(t, h, "/explorer/api/sharepool"); again.Code != 200 || again.Body.String() != rec.Body.String() {
+		t.Fatalf("the cached answer: %d", again.Code)
 	}
 }

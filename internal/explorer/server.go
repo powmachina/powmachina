@@ -62,6 +62,8 @@ type Server struct {
 	// would fall apart. A new address = a new file; purging the cache stops being part of a deployment.
 	css     []byte
 	cssPath string
+	// live is the shared answer of the live API (live.go).
+	live liveCache
 }
 
 func NewServer(cli *Client, cfg Config) (*Server, error) {
@@ -126,6 +128,7 @@ func (s *Server) Handler() http.Handler {
 	})
 	mux.HandleFunc("GET "+b+"/richlist", s.handleRichList)
 	mux.HandleFunc("GET "+b+"/shares", s.handleShares)
+	mux.HandleFunc("GET "+b+"/api/sharepool", s.handleLive)
 	mux.HandleFunc("GET "+b+"/search", s.handleSearch)
 	mux.HandleFunc("GET "+b+s.cssPath, s.handleCSS)
 	// The plain address works too, for anything that links the stylesheet without the fingerprint.
