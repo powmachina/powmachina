@@ -36,18 +36,18 @@ func LaneAllowed(recent []mh.Lane, lane mh.Lane) bool {
 //
 // The gap is measured against the **parent block**, not against median time past. MTP is
 // the median of eleven blocks, so it trails the tip by roughly six of them (~12 minutes at
-// the 120 s target). Measured against MTP, a perfectly healthy chain satisfies the relief
-// almost always: a three-minute gap between blocks is ordinary, and 12 + 3 > 15 minutes.
-// The rule that is the whole point of two lanes would therefore be switched off nearly all
-// the time, and one lane could run dozens of blocks in a row.
+// a 120 s block, three at 30 s against a relief of five). Measured against MTP, a perfectly healthy
+// chain satisfies the relief most of the time: the trail plus an ordinary gap between blocks.
+// The rule that is the whole point of two lanes would therefore be switched off much of the
+// time, and one lane could run dozens of blocks in a row.
 //
 // Both times come from block headers, so every node gets the same answer forever. Using
 // the local clock here would make the same block valid for one node and invalid for
 // another, and historical validation would always see the relief.
 //
 // Faking the gap buys an attacker little: from ForkLaneDifficulty on a block is not dated
-// before its parent and at most 30 s ahead of the real clock, so of a claimed 15-minute gap at
-// least 870 s are real. (Before the fork the bounds were the median time past and 120 s, and
+// before its parent and at most 30 s ahead of the real clock, so of a claimed 5-minute gap at
+// least 270 s are real. (Before the fork the bounds were the median time past and 120 s, and
 // most of the gap could be made up.)
 func LaneAllowedAt(recent []mh.Lane, lane mh.Lane, blockTime, parentTime time.Time) bool {
 	if blockTime.Sub(parentTime) > LaneRotationRelief {
@@ -64,7 +64,7 @@ func LaneAllowedAt(recent []mh.Lane, lane mh.Lane, blockTime, parentTime time.Ti
 // `parentTime` is the timestamp of the current tip.
 func AllowedLanes(recent []mh.Lane, blockTime, parentTime time.Time) []mh.Lane {
 	// A header carries whole seconds. Asked with the clock's sub-second part, this would open a
-	// lane 900.3 s after the parent, the block built on that answer would say 900 s, and 900 is
+	// lane 300.3 s after the parent, the block built on that answer would say 300 s, and 300 is
 	// not more than the relief — every block of that job is refused, for as long as the job lives.
 	blockTime = time.Unix(blockTime.Unix(), 0)
 	out := make([]mh.Lane, 0, len(mh.Lanes))

@@ -5,7 +5,7 @@
 # Architectures: Turing (sm_75) through Blackwell (sm_120) + PTX for future cards.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-IMG=${IMG:-nvidia/cuda:13.0.1-devel-ubuntu24.04}
+IMG=${IMG:-nvidia/cuda:13.4.3-devel-ubuntu24.04}
 ARCH=${ARCH:-"-gencode arch=compute_75,code=sm_75 -gencode arch=compute_80,code=sm_80 \
  -gencode arch=compute_86,code=sm_86 -gencode arch=compute_89,code=sm_89 \
  -gencode arch=compute_90,code=sm_90 -gencode arch=compute_120,code=sm_120 \

@@ -236,3 +236,33 @@ func TestAPaymentToAChangeAddressIsNotHiddenAsChange(t *testing.T) {
 		t.Fatalf("the payer sees %d change outputs in its own payment, expected 1", changes)
 	}
 }
+
+// A small change weighs a lot (storage mass), so a smaller change needs a higher fee, which makes the
+// change smaller still. Close to the dust limit no fee pays for such a change at all. Whatever the
+// remainder, the payment has to pay the fee the node asks for — a pool paying out 18.69 POWM was
+// turned away with 998 cogs per 1 000 units of weight.
+func TestAPaymentPaysTheMinimumFeeWhateverTheRemainder(t *testing.T) {
+	w, _ := fundedWallet(t)
+	other, _ := testWallet(t)
+	to := pubOf(t, other, must(other.NewAddress("")))
+	for _, coins := range []int64{1, 2} {
+		for rest := int64(0); rest < 400_000; rest += 97 {
+			tx, fee, err := w.Build([]Payment{{To: to, Amount: coins*40*chain.POWM - rest}}, 0)
+			if err != nil {
+				if !errors.Is(err, ErrNoFunds) || coins == 1 {
+					t.Fatalf("%d coins, remainder %d: %v", coins, rest, err)
+				}
+				continue
+			}
+			values := make([]int64, len(tx.Inputs))
+			for i := range values {
+				values[i] = 40 * chain.POWM
+			}
+			weight := chain.PolicyWeight(len(tx.Serialize()), values, tx.Outputs)
+			if rate := fee * 1000 / int64(weight); rate < chain.MinRelayFeePerKB {
+				t.Fatalf("%d coins, remainder %d: fee %d for weight %d = %d cogs per 1 000",
+					coins, rest, fee, weight, rate)
+			}
+		}
+	}
+}

@@ -44,6 +44,11 @@ type node struct {
 	// them it would walk back through the whole chain for a lane that has not mined for a while.
 	lastOf [len(mh.Lanes)]*node
 	first  *node
+	// tainted: this block or one below it is marked invalid. A header is only filed when its
+	// branch is clean, so it starts false; an invalidation sets it on everything above the mark
+	// (retaintLocked). Asking it is one load — walking down to the genesis for every header was
+	// a step per block of history, and a sync of the whole chain grew with its square.
+	tainted bool
 }
 
 // link fills in what a node inherits from its parent. Every node but the genesis goes through it.
@@ -72,6 +77,8 @@ type HeaderChain struct {
 	genesis  [32]byte
 	finality *FinalityState
 	now      func() time.Time
+	// votes count the share units seen built on a block (siblings.go); nil counts none.
+	votes func(id [32]byte) uint64
 }
 
 // GenesisID is the root this chain stands on. It is set once in the constructor and never
@@ -237,7 +244,7 @@ func (hc *HeaderChain) checkLocked(h *Header, id [32]byte) (*node, error) {
 
 	// A header from an invalid branch goes away right away: we paid for it once by downloading
 	// the body and validating it, we will not pay a second time.
-	if hc.invalid[id] || hc.hasInvalidAncestorLocked(parent, map[[32]byte]bool{}) {
+	if hc.invalid[id] || parent.tainted {
 		return nil, ErrInvalidAncestor
 	}
 	if cp, ok := hc.params.checkpointAt(uint64(h.Height)); ok && cp != id {
@@ -318,6 +325,14 @@ func (hc *HeaderChain) AddHeader(h *Header, pow PoWChecker) (bool, error) {
 	// A header above a parked block is filed and waits with it.
 	if hc.hasParkedAncestorLocked(n) {
 		return false, nil
+	}
+	// A sibling of the tip: the votes and the lower ID decide, not the work (siblings.go).
+	if isSiblingLocked(n, hc.tip) {
+		if !hc.prefersSiblingLocked(n, hc.tip) {
+			return false, nil
+		}
+		hc.tip = n
+		return true, nil
 	}
 	return hc.maybeReorgLocked(n)
 }
@@ -454,6 +469,9 @@ func (hc *HeaderChain) nextBitsLocked(parent *node, lane mh.Lane) (uint32, error
 func (hc *HeaderChain) normalizedWorkLocked(parent *node, h *Header) (*big.Int, error) {
 	avg := make(map[mh.Lane]*big.Int)
 	cnt := make(map[mh.Lane]int64)
+	// 12 h at a 30 s block (it was 2 days at 120 s). Kept in blocks when the block got shorter: an
+	// average of the lanes' difficulty needs hours, not days, and every header walks the window, so
+	// four times the window would be four times the work of a sync.
 	const window = 1440
 	seen := 0
 	for n := parent; n != nil && seen < window; n = hc.byID[n.header.PrevBlock] {
@@ -620,7 +638,7 @@ func (hc *HeaderChain) LoadHeader(h *Header) error {
 	if uint64(h.Height) != parent.height+1 {
 		return ErrBadHeight
 	}
-	if hc.invalid[id] || hc.hasInvalidAncestorLocked(parent, map[[32]byte]bool{}) {
+	if hc.invalid[id] || parent.tainted {
 		return ErrInvalidAncestor
 	}
 	// A checkpoint applies to a restore from disk as well. Otherwise a node that once downloaded
@@ -635,7 +653,12 @@ func (hc *HeaderChain) LoadHeader(h *Header) error {
 	n := &node{header: h, id: id, work: new(big.Int).Add(parent.work, w), height: uint64(h.Height)}
 	n.link(parent)
 	hc.byID[id] = n
-	if n.work.Cmp(hc.tip.work) > 0 {
+	// A restart has seen no votes, so of two siblings the lower ID is the tip again.
+	if isSiblingLocked(n, hc.tip) {
+		if hc.prefersSiblingLocked(n, hc.tip) {
+			hc.tip = n
+		}
+	} else if n.work.Cmp(hc.tip.work) > 0 {
 		hc.tip = n
 	}
 	return nil
@@ -648,12 +671,12 @@ func (hc *HeaderChain) LoadHeader(h *Header) error {
 // is not a single number — and **the share of blocks between the lanes** is the metric that shows
 // whether CPU/GPU parity really works or one side is collapsing.
 //
-// The 10/40/80/120 windows are taken from Tari, which has the same problem with four algorithms:
-// a short window shows the swing, a long one shows the trend, and the difference between them is
-// the interesting part.
+// The windows are Tari's 10/40/80/120 at a 120 s block, four times longer in blocks at 30 s so they
+// cover the same time. Tari has the same problem with four algorithms: a short window shows the
+// swing, a long one shows the trend, and the difference between them is the interesting part.
 
 // LaneWindows are the windows the share of blocks is computed over.
-var LaneWindows = []int{10, 40, 80, 120}
+var LaneWindows = []int{40, 160, 320, 480}
 
 // LaneStat is the state of one lane.
 type LaneStat struct {
@@ -715,7 +738,7 @@ type HashrateSeries struct {
 // constant from the binary. Everything is integer; big.Int, because one block's work can be
 // arbitrarily large.
 func (hc *HeaderChain) HashrateSeries(blocks, window, points int) HashrateSeries {
-	blocks = min(max(blocks, 2), 20_000)
+	blocks = min(max(blocks, 2), 80_000)
 	window = min(max(window, 2), 500)
 	points = min(max(points, 2), 1_000)
 

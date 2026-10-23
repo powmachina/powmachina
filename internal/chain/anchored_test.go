@@ -12,8 +12,8 @@ type anyPoW struct{}
 
 func (anyPoW) VerifyPoW(*Header) (bool, error) { return true, nil }
 
-// cheapBranch files `count` headers at the easiest difficulty on top of the genesis: timestamps far
-// enough apart keep the difficulty at the floor, which is what makes such a history cheap to make.
+// cheapBranch files `count` headers at the retarget's difficulty on top of the genesis: timestamps
+// far enough apart keep it at or near the floor, which is what makes such a history cheap to make.
 func cheapBranch(t *testing.T, hc *HeaderChain, g *Header, count int, salt uint64) (last [32]byte, firstErr error) {
 	t.Helper()
 	prev, tm := g.ID(), g.Time
@@ -23,7 +23,13 @@ func cheapBranch(t *testing.T, hc *HeaderChain, g *Header, count int, salt uint6
 		if i%3 == 0 {
 			lane = mh.LaneC
 		}
-		h := &Header{Version: 1, PrevBlock: prev, Bits: MaxTargetBits, Height: uint32(i), Time: tm, Lane: lane,
+		hc.mu.RLock()
+		bits, err := hc.nextBitsLocked(hc.byID[prev], lane)
+		hc.mu.RUnlock()
+		if err != nil {
+			t.Fatal(err)
+		}
+		h := &Header{Version: 1, PrevBlock: prev, Bits: bits, Height: uint32(i), Time: tm, Lane: lane,
 			Nonce: salt<<32 | uint64(i)}
 		if _, err := hc.AddHeader(h, anyPoW{}); err != nil {
 			return prev, err
@@ -33,13 +39,13 @@ func cheapBranch(t *testing.T, hc *HeaderChain, g *Header, count int, salt uint6
 	return prev, nil
 }
 
-// A node on its first download takes headers from whoever answers first. Five hundred and one cheap
+// A node on its first download takes headers from whoever answers first. ReorgLimit + 1 cheap
 // headers used to be enough to hold it: the fork depth limit, measured from that tip, refused the
 // real chain at height 1, for good. Below its checkpoints a node defends nothing and follows the
 // most work.
 func TestAChainBelowItsCheckpointsCanBeLeft(t *testing.T) {
 	p := TestNet
-	p.Checkpoints = []Checkpoint{{Height: 1000, ID: [32]byte{0xAA}}}
+	p.Checkpoints = []Checkpoint{{Height: 2 * ReorgLimit, ID: [32]byte{0xAA}}}
 	p.MinChainWork = "ffffffffff"
 	g := TestnetGenesis()
 	hc := NewHeaderChain(p, g, nil)

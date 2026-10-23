@@ -64,12 +64,12 @@ type ChartRange struct {
 }
 
 // ChartRanges are the ranges offered. The block counts have margin for blocks arriving faster than
-// the target 120 s (`blocks` is a cap, the trimming is done by Span).
+// the target 30 s (`blocks` is a cap, the trimming is done by Span).
 var ChartRanges = []ChartRange{
-	{Key: "1h", Label: "1H", Span: time.Hour, Blocks: 120, Window: 6, Points: 140},
-	{Key: "6h", Label: "6H", Span: 6 * time.Hour, Blocks: 700, Window: 12, Points: 180},
-	{Key: "24h", Label: "24H", Span: 24 * time.Hour, Blocks: 2600, Window: 12, Points: 220},
-	{Key: "7d", Label: "7D", Span: 7 * 24 * time.Hour, Blocks: 18_000, Window: 24, Points: 260},
+	{Key: "1h", Label: "1H", Span: time.Hour, Blocks: 480, Window: 24, Points: 140},
+	{Key: "6h", Label: "6H", Span: 6 * time.Hour, Blocks: 2800, Window: 48, Points: 180},
+	{Key: "24h", Label: "24H", Span: 24 * time.Hour, Blocks: 10_400, Window: 48, Points: 220},
+	{Key: "7d", Label: "7D", Span: 7 * 24 * time.Hour, Blocks: 72_000, Window: 96, Points: 260},
 }
 
 // DefaultChartRange is the range the page shows without a choice. A shorter range has denser points,

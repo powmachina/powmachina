@@ -59,7 +59,7 @@ func spendScene(t *testing.T, params chain.NetParams, badSignature bool) (*Node,
 		t.Fatal(err)
 	}
 	tampered.Txs[1].Witness[0].Items[0][10] ^= 1
-	if tampered.Header.ID() != id || chain.TxMerkleRoot(tampered.Txs) != tampered.Header.MerkleRoot {
+	if tampered.Header.ID() != id || tampered.CheckRoot() != nil {
 		t.Fatal("setup: the tampered copy no longer matches the header")
 	}
 
@@ -204,9 +204,9 @@ func TestCommittedPartTellsABadBlockFromABadCopy(t *testing.T) {
 	}
 }
 
-// The whole road of a fork on a running chain: before its height the blocks signal the rule and
-// carry no commitment, from its height on they carry it and stop signalling — and a second node
-// with the same table follows the chain across the height.
+// The whole road of a fork on a running chain: before its height the blocks signal the rule, from
+// its height on they stop — every block carries the commitment output, because it carries the
+// credit root too — and a second node with the same table follows the chain across the height.
 func TestChainCrossesTheWitnessCommitmentFork(t *testing.T) {
 	const fork = 4
 	params := chain.RegTest
@@ -225,8 +225,9 @@ func TestChainCrossesTheWitnessCommitmentFork(t *testing.T) {
 		}
 		signals := chain.SignalsFork(b.Header.Version, chain.ForkWitnessCommitment)
 		last := b.Txs[0].Outputs[len(b.Txs[0].Outputs)-1]
-		commits := last.ScriptVersion == chain.ScriptVersionData && len(last.Script) == chain.WitnessCommitmentBytes
-		if before := h < fork; signals != before || commits == before {
+		commits := last.ScriptVersion == chain.ScriptVersionData && len(last.Script) == chain.CoinbaseCommitmentBytes &&
+			string(last.Script[:4]) == "PMwc"
+		if before := h < fork; signals != before || !commits {
 			t.Fatalf("height %d (fork at %d): signals %v, commits %v", h, fork, signals, commits)
 		}
 	}
@@ -248,25 +249,6 @@ func TestChainCrossesTheWitnessCommitmentFork(t *testing.T) {
 	feedBranch(t, node, src, 1, fork+2)
 	if applied, _ := node.appliedHeight(); applied != fork+2 {
 		t.Fatalf("the second node applied %d blocks of %d", applied, fork+2)
-	}
-
-	// A node whose table does not have the fork yet stops at the height: it does not seal, so
-	// its own block there is not one the others take.
-	stale := chain.RegTest
-	stale.Forks = nil
-	old := NewNode(stale, chain.RegtestGenesis(), mh.TestProfile)
-	defer old.Close()
-	feedBranch(t, old, src, 1, fork-1)
-	if err := old.MineBlocks(1); err != nil {
-		t.Fatal(err)
-	}
-	_, _, oldTip := old.chain.Tip()
-	unsealed, err := old.store.Block(oldTip)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := unsealed.ValidateBlock(node.store, params); !errors.Is(err, chain.ErrNoWitnessCommitment) {
-		t.Fatalf("a block without a commitment at the fork height: %v", err)
 	}
 }
 

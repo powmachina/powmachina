@@ -54,7 +54,9 @@ func (n *Node) connectTo(addr p2p.Address, kind p2p.PeerKind) (*p2p.Conn, *p2p.P
 		conn.Close()
 		return nil, nil, err
 	}
-	// The connection went all the way through — the address is verified.
+	// The connection went all the way through — the address is verified, with the services the
+	// peer has now, not those somebody said it had.
+	addr.Services = remote.Services
 	n.addrs.Good(addr)
 	return conn, peer, nil
 }
@@ -97,15 +99,30 @@ func (n *Node) FeelerOnce() error {
 	return nil
 }
 
+// outboundCandidate picks the address for a new outbound connection. A full connection of a node
+// that holds the full DAG goes to a peer like it first, while it has fewer than fullDagPeers.
+func (n *Node) outboundCandidate(kind p2p.PeerKind) (p2p.Address, error) {
+	if kind == p2p.PeerOutboundFull && n.epochs.isFull() &&
+		n.peers.CountServices(p2p.PeerOutboundFull, p2p.ServiceFullDag) < fullDagPeers {
+		if addr, err := n.peers.SelectOutboundServices(kind, p2p.ServiceFullDag); err == nil {
+			return addr, nil
+		}
+	}
+	return n.peers.SelectOutboundCandidate(kind)
+}
+
 // MaintainOutbound fills the missing outbound connections.
 //
 // Both kinds of slot are maintained **independently**. If block-relay slots were only filled
 // once the full ones were, they would never come about on a small network — and those are
 // exactly where the anchor peers that protect the node across a restart come from.
 func (n *Node) MaintainOutbound() {
+	n.keepPrivatePeers()
 	cfg := p2p.DefaultManagerConfig()
 	if n.peers.Count(p2p.PeerOutboundFull) < cfg.MaxOutboundFull {
 		_ = n.FillOutboundOnce(p2p.PeerOutboundFull)
+	} else {
+		n.swapForFullDag()
 	}
 	if n.peers.Count(p2p.PeerOutboundBlock)+n.peers.Count(p2p.PeerAnchor) < cfg.MaxOutboundBlock {
 		_ = n.FillOutboundOnce(p2p.PeerOutboundBlock)
@@ -114,15 +131,36 @@ func (n *Node) MaintainOutbound() {
 
 // FillOutboundOnce fills one missing outbound connection of the given kind.
 func (n *Node) FillOutboundOnce(kind p2p.PeerKind) error {
-	addr, err := n.peers.SelectOutboundCandidate(kind)
+	addr, err := n.outboundCandidate(kind)
 	if err != nil {
 		return err
 	}
+	return n.connectOutbound(addr, kind)
+}
+
+// keepPrivatePeers reconnects the -addnode peers on private addresses (Bootstrap). The addrman
+// does not take those on a public network, so nothing else would ever dial them.
+func (n *Node) keepPrivatePeers() {
+	for _, addr := range n.privatePeers {
+		n.mu.Lock()
+		_, connected := n.conns[addr.String()]
+		n.mu.Unlock()
+		if connected {
+			continue
+		}
+		if err := n.connectOutbound(addr, p2p.PeerOutboundFull); err != nil && !errors.Is(err, errNodeClosing) {
+			log.Printf("private peer %s unreachable: %v", addr, err)
+		}
+	}
+}
+
+// connectOutbound connects to one address and serves the connection until it ends.
+func (n *Node) connectOutbound(addr p2p.Address, kind p2p.PeerKind) error {
 	conn, peer, err := n.connectTo(addr, kind)
 	if err != nil {
 		return err
 	}
-	n.addConn(addr, conn)
+	n.addConn(addr, conn, peer)
 	if !n.addLive(conn) {
 		n.removeConn(addr)
 		n.peers.Remove(addr)
@@ -134,6 +172,9 @@ func (n *Node) FillOutboundOnce(kind p2p.PeerKind) error {
 	// We ask for headers right away — otherwise the node would hang connected and learn nothing.
 	if err := n.RequestHeaders(conn); err != nil {
 		log.Printf("the headers request failed: %v", err)
+	}
+	if kind == p2p.PeerOutboundFull {
+		n.greetAddrs(conn)
 	}
 
 	if !n.goTracked(func() {
@@ -157,7 +198,7 @@ func (n *Node) FillOutboundOnce(kind p2p.PeerKind) error {
 // previous one.
 //
 // Without it every connection dies on the read deadline (ReadTimeout, 90 s). With a block
-// every 120 s a connection is idle almost always, so this is not the state of an empty network
+// every 30 s a connection is idle most of the time, so this is not the state of an empty network
 // but of normal operation: the network falls apart into individual machines and the log only
 // shows nodes reconnecting forever. The node could answer a ping from the start, sending one
 // it could not.
@@ -283,7 +324,7 @@ func (n *Node) ConnectAnchors(path string) {
 			log.Printf("anchor %s unreachable: %v", line, err)
 			continue
 		}
-		n.addConn(addr, conn)
+		n.addConn(addr, conn, peer)
 		if !n.addLive(conn) {
 			n.removeConn(addr)
 			n.peers.Remove(addr)
@@ -344,10 +385,18 @@ func (n *Node) Bootstrap(ctx context.Context, manual []string) {
 		}
 		for _, ip := range ips {
 			addr := p2p.Address{IP: ip, Port: uint16(port), LastSeen: time.Now()}
+			if !p2p.Dialable(addr, n.addrs.AllowPrivate) {
+				// A private address on a public network: a sibling in the operator's own VPN.
+				// It stays out of the addrman — nothing private may spread from there — and is
+				// kept connected on its own (keepPrivatePeers).
+				n.privatePeers = append(n.privatePeers, addr)
+				log.Printf("peer %s added, kept connected as a private peer", hostport)
+				continue
+			}
 			// The source is the address itself — a manually given peer has no business influencing other peers' buckets.
 			n.addrs.Add(addr, ip)
+			log.Printf("peer %s added", hostport)
 		}
-		log.Printf("peer %s added", hostport)
 	}
 
 	if len(n.params.DNSSeeds) == 0 && len(n.params.FixedSeeds) == 0 {

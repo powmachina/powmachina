@@ -52,12 +52,12 @@ func (n *Node) Mine(pay *[32]byte, extra []*chain.Tx) *chain.Block {
 	}
 	txs = append(txs, extra...)
 	n.Pool = make(map[[32]byte]*chain.Tx)
-	hdr := &chain.Header{Version: 1, Height: h, Time: 1_800_000_000 + h*120,
-		MerkleRoot: chain.TxMerkleRoot(txs)}
+	hdr := &chain.Header{Version: 1, Height: h, Time: 1_800_000_000 + h*120}
 	if h > 0 {
 		hdr.PrevBlock = n.Chain[h-1].Header.ID()
 	}
 	b := &chain.Block{Header: hdr, Txs: txs}
+	b.Seal()
 	n.Chain = append(n.Chain, b)
 	return b
 }

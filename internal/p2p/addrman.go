@@ -41,6 +41,9 @@ type Address struct {
 	Port     uint16
 	Onion    string // non-empty for .onion peers
 	LastSeen time.Time
+	// Services the address was last seen with: from the handshake once we connected to it,
+	// before that what the peer that told us about it claimed. A hint for the choice, not trust.
+	Services uint64
 }
 
 // String is the address's stable text key (for onion peers too).
@@ -155,6 +158,10 @@ func (m *AddrMan) Add(addr Address, source net.IP) bool {
 		m.byKey[k] = e
 	} else if addr.LastSeen.After(e.addr.LastSeen) {
 		e.addr.LastSeen = addr.LastSeen
+		if !e.tried {
+			// A tried address has services from its handshake; a hearsay one takes the newest claim.
+			e.addr.Services = addr.Services
+		}
 	}
 	if e.tried || e.refCount >= newBucketsPerAddress {
 		return false
@@ -205,7 +212,8 @@ func (m *AddrMan) removeLocked(key string) {
 	delete(m.byKey, key)
 }
 
-// Good marks an address a connection succeeded with — it moves it into the tried table.
+// Good marks an address a connection succeeded with — it moves it into the tried table. The
+// services in `addr` are the ones the peer gave in the handshake, and they replace any heard ones.
 func (m *AddrMan) Good(addr Address) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -217,6 +225,8 @@ func (m *AddrMan) Good(addr Address) {
 		m.byKey[k] = e
 	}
 	e.attempts = 0
+	e.addr.Services = addr.Services
+	e.addr.LastSeen = time.Now()
 	if e.tried {
 		return
 	}
@@ -365,6 +375,64 @@ func (m *AddrMan) Select(triedOnly bool) (Address, error) {
 		return addr, nil
 	}
 	return Address{}, ErrNoAddresses
+}
+
+// SelectServices picks an address that was seen with every service in `want`, from either table,
+// skipping those `skip` names. Like Select it picks a bucket first and an address inside it, only
+// among the buckets that hold a match: whoever claims a service for a thousand addresses from one
+// /16 still has only that network's buckets.
+func (m *AddrMan) SelectServices(want uint64, skip func(Address) bool) (Address, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var buckets [][]string
+	collect := func(tables []map[string]bool) {
+		for i := range tables {
+			var match []string
+			for k := range tables[i] {
+				e := m.byKey[k]
+				if e.addr.Services&want == want && (skip == nil || !skip(e.addr)) {
+					match = append(match, k)
+				}
+			}
+			if len(match) > 0 {
+				buckets = append(buckets, match)
+			}
+		}
+	}
+	collect(m.tried[:])
+	collect(m.newB[:])
+	if len(buckets) == 0 {
+		return Address{}, ErrNoAddresses
+	}
+	b := buckets[randInt(len(buckets))]
+	return m.byKey[b[randInt(len(b))]].addr, nil
+}
+
+// Sample is what the node answers a `getaddr` with: random addresses, leaving out onion ones and
+// those that keep failing. From a table of more than a hundred it gives at most 23 % (Bitcoin
+// Core's share), so one question does not copy out the whole table; a small one it gives whole.
+func (m *AddrMan) Sample(max int) []Address {
+	m.mu.Lock()
+	all := make([]Address, 0, len(m.byKey))
+	for _, e := range m.byKey {
+		if e.addr.Onion != "" || e.addr.IP == nil || (!e.tried && e.attempts >= 3) {
+			continue
+		}
+		all = append(all, e.addr)
+	}
+	m.mu.Unlock()
+	n := len(all)
+	if n > 100 {
+		n = n * 23 / 100
+	}
+	if n > max {
+		n = max
+	}
+	for i := 0; i < n; i++ {
+		j := i + randInt(len(all)-i)
+		all[i], all[j] = all[j], all[i]
+	}
+	return all[:n]
 }
 
 // SelectNew picks an address **from the new table only** — that is the job for a feeler connection.

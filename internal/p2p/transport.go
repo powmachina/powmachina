@@ -22,8 +22,8 @@ const (
 	// PingInterval is how often the node sends a ping. It is sent even on a connection with traffic
 	// — it is 32 bytes and it does not measure idleness but whether the peer still answers.
 	//
-	// It has to be considerably less than ReadTimeout: with a block every 120 s a connection is idle
-	// almost always, so without a ping every connection dies on the read deadline and the nodes
+	// It has to be considerably less than ReadTimeout: with a block every 30 s a connection is idle
+	// most of the time, so without a ping every connection dies on the read deadline and the nodes
 	// reconnect forever.
 	PingInterval = 30 * time.Second
 	// PingTimeout is the time a pong has to arrive within. A peer that answers other messages but

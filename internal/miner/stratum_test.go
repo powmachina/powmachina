@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -33,7 +34,7 @@ func (f *stratumNode) WorkTemplate(lane mh.Lane) (*work.Template, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return &work.Template{Height: f.height + 1, Lane: lane.String(), Bits: fmt.Sprintf("%08x", chain.RegtestTargetBits),
-		PrevBlock: hex.EncodeToString(f.tip[:]), MinTime: 1_700_000_001}, nil
+		PrevBlock: hex.EncodeToString(f.tip[:]), MinTime: 1_700_000_001, CreditRoot: strings.Repeat("00", 32)}, nil
 }
 func (f *stratumNode) PoWHash(h *chain.Header) ([32]byte, error) {
 	f.mu.Lock()
@@ -41,6 +42,7 @@ func (f *stratumNode) PoWHash(h *chain.Header) ([32]byte, error) {
 	pow := h.PoWInput()
 	return f.h.Hash(f.v, &pow, h.Nonce, h.Lane)
 }
+func (f *stratumNode) SubmitShare(*chain.Share) (bool, error) { return false, nil }
 func (f *stratumNode) SubmitBlock(b *chain.Block) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -106,10 +108,9 @@ func TestMinerOverStratum(t *testing.T) {
 	close(quit)
 	<-done
 	for i, b := range node.blocks[:3] {
-		// The last output is the witness commitment; the miner's is the one before it.
-		outs := b.Txs[0].Outputs
-		if len(outs) < 2 || string(outs[len(outs)-2].Script) != string(k) {
-			t.Fatalf("the block %d does not pay the address from the login", i)
+		// The block's share is credited to the login's address; the coinbase pays credits.
+		if string(b.Share.Payout[:]) != string(k) {
+			t.Fatalf("the block %d does not credit the address from the login", i)
 		}
 	}
 }

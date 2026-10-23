@@ -34,7 +34,11 @@ func coinbaseTx(height uint64, minerValue int64, params NetParams) *Tx {
 	if fee := DevFee(height); fee > 0 {
 		tx.Outputs = append(tx.Outputs, TxOut{Value: fee, Script: params.DevFeeScriptAt(height)})
 	}
-	tx.Outputs = append(tx.Outputs, TxOut{Value: minerValue, Script: minerKey})
+	// A block pays its miner nothing (credits.go): an output of `minerValue` makes it invalid, which
+	// is what the tests that pass one check.
+	if minerValue > 0 {
+		tx.Outputs = append(tx.Outputs, TxOut{Value: minerValue, Script: minerKey})
+	}
 	return tx
 }
 
@@ -47,15 +51,15 @@ func blockWith(height uint64, txs []*Tx) *Block {
 			Time: 1_700_000_500},
 		Txs: txs,
 	}
-	SealCoinbase(txs, height, RegTest)
-	b.Header.MerkleRoot = TxMerkleRoot(txs)
+	SealCoinbase(txs, CreditsRoot(0, nil)) // the credit state of a fresh UTXOSet
+	b.Seal()
 	return b
 }
 
 func TestBlockRoundTrip(t *testing.T) {
 	p := RegTest
 	h := uint64(10)
-	cb := coinbaseTx(h, MinerSubsidy(h), p)
+	cb := coinbaseTx(h, 0, p)
 	_, pk := testKey(t, 3)
 	spend := &Tx{Version: 1,
 		Inputs:  []TxIn{{PrevTxID: [32]byte{1, 2, 3}, PrevIndex: 0, Sequence: 0xffffffff}},
@@ -108,12 +112,12 @@ func TestCoinbaseRules(t *testing.T) {
 	h := uint64(10)
 
 	// A correct block.
-	ok := blockWith(h, []*Tx{coinbaseTx(h, MinerSubsidy(h), p)})
+	ok := blockWith(h, []*Tx{coinbaseTx(h, 0, p)})
 	if err := ok.ValidateBlock(u, p); err != nil {
 		t.Fatalf("a valid block was refused: %v", err)
 	}
 
-	// The miner took more than they may.
+	// The miner paid itself: a block pays its miner only through credits.
 	greedy := blockWith(h, []*Tx{coinbaseTx(h, Subsidy(h), p)})
 	if err := greedy.ValidateBlock(u, p); err == nil {
 		t.Fatal("a coinbase over the limit passed")
@@ -127,14 +131,14 @@ func TestCoinbaseRules(t *testing.T) {
 	}
 
 	// The dev fee is one cog short.
-	short := coinbaseTx(h, MinerSubsidy(h), p)
+	short := coinbaseTx(h, 0, p)
 	short.Outputs[0].Value--
 	if err := blockWith(h, []*Tx{short}).ValidateBlock(u, p); err == nil {
 		t.Fatal("a short dev fee passed")
 	}
 
 	// The dev fee is not the first output.
-	swapped := coinbaseTx(h, MinerSubsidy(h), p)
+	swapped := coinbaseTx(h, 1000, p)
 	swapped.Outputs[0], swapped.Outputs[1] = swapped.Outputs[1], swapped.Outputs[0]
 	if err := blockWith(h, []*Tx{swapped}).ValidateBlock(u, p); err == nil {
 		t.Fatal("a dev fee outside the first output passed")
@@ -142,13 +146,13 @@ func TestCoinbaseRules(t *testing.T) {
 
 	// After the dev fee ends it is no longer required.
 	late := uint64(DevFeeEndHeight + 1)
-	lateBlock := blockWith(late, []*Tx{coinbaseTx(late, Subsidy(late), p)})
+	lateBlock := blockWith(late, []*Tx{coinbaseTx(late, 0, p)})
 	if err := lateBlock.ValidateBlock(u, p); err != nil {
 		t.Fatalf("after the dev fee ends the block should pass: %v", err)
 	}
 
 	// Two coinbases in one block.
-	two := blockWith(h, []*Tx{coinbaseTx(h, MinerSubsidy(h), p), coinbaseTx(h, MinerSubsidy(h), p)})
+	two := blockWith(h, []*Tx{coinbaseTx(h, 0, p), coinbaseTx(h, 0, p)})
 	if err := two.ValidateBlock(u, p); !errors.Is(err, ErrExtraCoinbase) && !errors.Is(err, ErrDuplicateTx) {
 		t.Fatalf("two coinbases should be refused, got %v", err)
 	}
@@ -180,7 +184,7 @@ func TestSpendingRules(t *testing.T) {
 			}
 			tx.Witness[i] = Witness{Items: [][]byte{sig}}
 		}
-		return blockWith(h, []*Tx{coinbaseTx(h, MinerSubsidy(h), p), tx})
+		return blockWith(h, []*Tx{coinbaseTx(h, 0, p), tx})
 	}
 
 	// A fee of 100 cogs.
@@ -244,7 +248,7 @@ func TestMerkleProperties(t *testing.T) {
 func TestBadMerkleRejected(t *testing.T) {
 	p := RegTest
 	h := uint64(10)
-	b := blockWith(h, []*Tx{coinbaseTx(h, MinerSubsidy(h), p)})
+	b := blockWith(h, []*Tx{coinbaseTx(h, 0, p)})
 	b.Header.MerkleRoot[0] ^= 0xff
 	if err := b.ValidateBlock(NewUTXOSet(), p); err != ErrBadMerkle {
 		t.Fatalf("expected ErrBadMerkle, got %v", err)

@@ -19,14 +19,14 @@ import (
 // blocks, up to 40 minutes). When every node restarts at once — a new binary rolled out
 // everywhere — finality reads "—" and everybody waits for the next height.
 func TestNodeRequestsMissingAttestations(t *testing.T) {
-	requestsMissingAttestations(t, int(chain.FinalityDepth)+1)
+	requestsMissingAttestations(t, finalityBlocks)
 }
 
 // The same on a chain longer than one request covers. The source keeps attestations from its
 // finalized height up and nothing below, so a node that asked for the oldest heights it lacks got
 // empty answers for ever.
 func TestNodeRequestsTheNewestAttestationsOnALongChain(t *testing.T) {
-	requestsMissingAttestations(t, int(chain.FinalityDepth)+p2p.MaxAttestHeights+7)
+	requestsMissingAttestations(t, finalityBlocks+p2p.MaxAttestHeights+7)
 }
 
 func requestsMissingAttestations(t *testing.T, blocks int) {
@@ -42,11 +42,7 @@ func requestsMissingAttestations(t *testing.T, blocks int) {
 	if !ok {
 		t.Fatalf("we do not have the block at height %d", target)
 	}
-	for i := 0; i < chain.FinalityThreshold; i++ {
-		if err := source.acceptAttestation(chain.Sign(chain.RegtestSignerKey(i), uint8(i), target, id), ""); err != nil {
-			t.Fatal(err)
-		}
-	}
+	// The source mined every block, so it is the quorum and signed each one as it went.
 	if got, _, ok := source.finality.Finalized(); !ok || got != target {
 		t.Fatalf("the source has no finality: %d (%v)", got, ok)
 	}
@@ -54,6 +50,7 @@ func requestsMissingAttestations(t *testing.T, blocks int) {
 	// A fresh node with the same chain but without the attestations — as after a restart.
 	fresh := NewNode(chain.RegTest, chain.RegtestGenesis(), mh.TestProfile)
 	defer fresh.Close()
+	fresh.noAttest = true
 	feedBranch(t, fresh, source, 1, height)
 	if _, _, ok := fresh.finality.Finalized(); ok {
 		t.Fatal("the fresh node must not have finality")

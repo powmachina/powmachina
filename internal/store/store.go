@@ -37,7 +37,7 @@ import (
 
 // The schema version. On an incompatible change it is raised and the node refuses to open an old
 // directory rather than silently reading the wrong data.
-const schemaVersion uint32 = 1
+const schemaVersion uint32 = 2 // 2: the credit state (prefixCredit, keyPot)
 
 // The prefixes of the key spaces. They are single bytes, so iteration within a space is contiguous
 // and cheap.
@@ -52,6 +52,7 @@ const (
 	prefixAddrSum byte = 0x08 // <script hash:32>  -> the address summary (optional)
 	prefixRich    byte = 0x09 // <inverted balance:8 BE><script hash:32> -> ∅ (the rich list)
 	prefixInvalid byte = 0x0A // <id:32>            -> ∅ (a block that failed validation)
+	prefixCredit  byte = 0x0B // <payout:32>        -> chain.Credit (the Sharepool's credit state)
 	prefixMeta    byte = 0xFF // the meta keys below
 )
 

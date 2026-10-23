@@ -104,7 +104,7 @@ func TestBlockRejectsSumOverCap(t *testing.T) {
 	sk, pk := testKey(t, 9)
 	h := uint64(1000)
 	var txs []*Tx
-	txs = append(txs, coinbaseTx(h, MinerSubsidy(h), p))
+	txs = append(txs, coinbaseTx(h, 0, p))
 	for i := range 40 {
 		op := Outpoint{TxID: [32]byte{byte(i + 1)}, Index: 0}
 		coin := Coin{Value: POWM, Script: pk, Height: 5}

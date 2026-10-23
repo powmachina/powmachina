@@ -7,8 +7,12 @@ import "powmachina/internal/mh"
 // The mainnet genesis is fixed only before the network launches (SPEC §5) — until then it is not
 // here, so a placeholder cannot be used by mistake as the real root of trust.
 
-// TestnetGenesis is the testnet's root. The time is 2026-10-10 07:00 UTC — the hour the network
-// was announced publicly, so the chain's age is readable from the chain itself.
+// TestnetGenesis is the testnet's root. The time is 2026-10-23 08:00 UTC — the hour the network
+// started, so the chain's age is readable from the chain itself. The root changes whenever
+// consensus changes in a way no fork can carry, even though it would not have to: a node with the
+// old binary and one with the new would otherwise shake hands (the same genesis and magic) and
+// then reject each other's blocks. With a different root they do not connect and the reason is
+// visible.
 //
 // The genesis has **no PoW and no body**, the same as on regtest: consensus does not verify it, it
 // is the root of trust written into the binary (`HeaderChain` takes it as given). Searching for a
@@ -19,7 +23,7 @@ import "powmachina/internal/mh"
 func TestnetGenesis() *Header {
 	return &Header{
 		Version: 1,
-		Time:    1_791_615_600, // 2026-10-10T07:00:00Z
+		Time:    1_792_742_400, // 2026-10-23T08:00:00Z
 		Bits:    MaxTargetBits,
 		Height:  0,
 		Nonce:   0,

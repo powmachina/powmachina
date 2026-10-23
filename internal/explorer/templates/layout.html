@@ -99,6 +99,7 @@
     <a href="{{url "/"}}"{{if eq .Tab "overview"}} aria-current="page"{{end}}>Overview</a>
     <a href="{{url "/blocks"}}"{{if eq .Tab "blocks"}} aria-current="page"{{end}}>Blocks</a>
     <a href="{{url "/txs"}}"{{if eq .Tab "txs"}} aria-current="page"{{end}}>Transactions</a>
+    <a href="{{url "/shares"}}"{{if eq .Tab "shares"}} aria-current="page"{{end}}>Shares</a>
     <a href="{{url "/algorithms"}}"{{if eq .Tab "algorithms"}} aria-current="page"{{end}}>Algorithms</a>
     <a href="{{url "/richlist"}}"{{if eq .Tab "richlist"}} aria-current="page"{{end}}>Rich list</a>
   </nav>
@@ -114,3 +115,34 @@
      name is written — "MachinaHash-C" says what a block was mined with, "C" says nothing. The
      square before the name stays: filled = a GPU algorithm, hollow = CPU. */}}
 {{define "lanetag"}}<span class="lane-tag lane-{{.}}"><i aria-hidden="true"></i>{{algo .}}</span>{{end}}
+
+{{/* A share mosaic: one bar split between miners by units, each in the colour of its icon. SVG with
+     the colours in attributes — the CSP allows no inline style. */}}
+{{define "mosaic"}}{{$m := mosaic .}}{{if $m}}
+<svg class="mosaic" viewBox="0 0 1000 24" preserveAspectRatio="none" role="img" aria-label="Shares by miner">
+  {{range $m}}<rect x="{{.X}}" y="0" width="{{.W}}" height="24" fill="{{.Color}}"><title>{{.Title}}</title></rect>{{end}}
+</svg>{{end}}{{end}}
+
+{{/* A miner: its icon and its address, linked. */}}
+{{define "miner"}}<a class="miner" href="{{url "/address/"}}{{.}}">{{icon . 16}}<span class="mono">{{short .}}</span></a>{{end}}
+
+{{/* The table of miners of a share summary. */}}
+{{define "minertable"}}
+<div class="scroll">
+<table>
+  <thead><tr><th>Miner</th><th class="num">Shares</th><th class="num">Units</th><th class="num">Part</th></tr></thead>
+  <tbody>
+  {{$t := .}}
+  {{range .Miners}}
+    <tr>
+      <td>{{template "miner" .Address}}</td>
+      <td class="num">{{.Shares}}</td>
+      <td class="num">{{.Units}}</td>
+      <td class="num dim">{{permille (unitshare .Units $t.Units)}}</td>
+    </tr>
+  {{end}}
+  </tbody>
+</table>
+</div>
+{{if gt .MinerCount (len .Miners)}}<p class="meta"><span class="dim">and {{.MinerCount}} miners in all — the list shows the {{len .Miners}} with the most units.</span></p>{{end}}
+{{end}}

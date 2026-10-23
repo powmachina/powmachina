@@ -7,7 +7,7 @@
 # RPC. Hence CGO_ENABLED=0 and a static binary in a scratch image: no shell, no package manager,
 # nothing that could be abused in a publicly exposed container.
 
-FROM golang:1.26-bookworm AS build
+FROM golang:1.27-bookworm AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download

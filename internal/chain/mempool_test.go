@@ -179,7 +179,7 @@ func TestRemoveConfirmedDropsConflicts(t *testing.T) {
 	}
 	// A different transaction spending the same input made it into the block.
 	other := signedSpend(t, sk, op, coin, []TxOut{{Value: 850_000, Script: pk}})
-	blk := blockWith(11, []*Tx{coinbaseTx(11, MinerSubsidy(11), RegTest), other})
+	blk := blockWith(11, []*Tx{coinbaseTx(11, 0, RegTest), other})
 
 	m.RemoveConfirmed(blk)
 	if m.Len() != 0 {

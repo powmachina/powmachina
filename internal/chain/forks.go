@@ -38,8 +38,8 @@ const (
 	// versionSignalShift is where the signal bits start.
 	versionSignalShift = 16
 	// SignalWindow is how many of the most recent blocks the signalling is counted over
-	// (1 000 blocks ≈ 33 h).
-	SignalWindow = 1000
+	// (4 000 blocks ≈ 33 h).
+	SignalWindow = 4000
 )
 
 const (

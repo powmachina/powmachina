@@ -1,0 +1,22 @@
+{{define "shares.html"}}{{template "top" .}}
+{{$p := .Data.Pool}}
+<p class="note lead">Every share a miner finds goes to the network and waits here until a block pays it —
+at most eight blocks. Each miner has its icon and colour, drawn from its address; the bar is the
+pool split by share units.</p>
+{{if not $p.TakesShares}}
+<p class="meta"><span>This explorer's node runs without the full DAG, so it verifies and keeps no shares.
+A block's page still shows the shares it paid.</span></p>
+{{else if eq $p.Shares 0}}
+<p class="meta"><span>No shares are waiting right now — the last block paid them all.</span></p>
+{{else}}
+<dl class="props">
+  <dt>shares</dt><dd>{{$p.Shares}}</dd>
+  <dt>share units</dt><dd>{{$p.Units}}</dd>
+  <dt>miners</dt><dd>{{$p.MinerCount}}</dd>
+</dl>
+{{template "mosaic" $p.ShareTally}}
+<div class="iconwall" aria-hidden="true">{{range $p.Miners}}<a href="{{url "/address/"}}{{.Address}}" title="{{.Address}}">{{icon .Address 28}}</a>{{end}}</div>
+<h2>Miners</h2>
+{{template "minertable" $p.ShareTally}}
+{{end}}
+{{template "bottom" .}}{{end}}

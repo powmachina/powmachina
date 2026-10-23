@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 
 	"github.com/cockroachdb/pebble/v2"
 	"powmachina/internal/chain"
@@ -80,6 +81,24 @@ func encodeUndo(u *chain.BlockUndo) []byte {
 		binary.LittleEndian.PutUint32(num[:4], op.Index)
 		buf.Write(num[:4])
 	}
+
+	// The credit state before the block: the pot, its root, and every entry the block changed
+	// (a flag 0 = the block created it).
+	binary.LittleEndian.PutUint64(num[:], uint64(u.Pot))
+	buf.Write(num[:])
+	buf.Write(u.CreditsRoot[:])
+	binary.LittleEndian.PutUint32(num[:4], uint32(len(u.Credits)))
+	buf.Write(num[:4])
+	for p, c := range u.Credits {
+		buf.Write(p[:])
+		if c == nil {
+			buf.WriteByte(0)
+			continue
+		}
+		buf.WriteByte(1)
+		ser := c.Serialize()
+		buf.Write(ser[:])
+	}
 	return buf.Bytes()
 }
 
@@ -137,6 +156,46 @@ func decodeUndo(b []byte) (*chain.BlockUndo, error) {
 			return nil, fmt.Errorf("store: corrupted undo data: %w", err)
 		}
 		u.Created = append(u.Created, op)
+	}
+
+	if _, err := r.Read(num[:]); err != nil {
+		return nil, fmt.Errorf("store: corrupted undo data: %w", err)
+	}
+	u.Pot = int64(binary.LittleEndian.Uint64(num[:]))
+	if _, err := r.Read(u.CreditsRoot[:]); err != nil {
+		return nil, fmt.Errorf("store: corrupted undo data: %w", err)
+	}
+	if n, err = readU32(); err != nil {
+		return nil, fmt.Errorf("store: corrupted undo data: %w", err)
+	}
+	if n > 0 {
+		u.Credits = make(map[[32]byte]*chain.Credit, n)
+	}
+	for i := uint32(0); i < n; i++ {
+		var p [32]byte
+		if _, err := r.Read(p[:]); err != nil {
+			return nil, fmt.Errorf("store: corrupted undo data: %w", err)
+		}
+		flag, err := r.ReadByte()
+		if err != nil || flag > 1 {
+			return nil, fmt.Errorf("store: corrupted undo data: credit flag %d (%v)", flag, err)
+		}
+		if flag == 0 {
+			u.Credits[p] = nil
+			continue
+		}
+		raw := make([]byte, chain.CreditBytes)
+		if _, err := io.ReadFull(r, raw); err != nil {
+			return nil, fmt.Errorf("store: corrupted undo data: %w", err)
+		}
+		c, err := chain.DeserializeCredit(raw)
+		if err != nil {
+			return nil, err
+		}
+		u.Credits[p] = &c
+	}
+	if r.Len() != 0 {
+		return nil, fmt.Errorf("store: corrupted undo data: %d trailing bytes", r.Len())
 	}
 	return u, nil
 }
@@ -295,69 +354,18 @@ func (s *Store) finishApply(batch *pebble.Batch, b *chain.Block, id [32]byte, he
 }
 
 // ApplyBlock writes a block's consequences **in one atomic batch**: the spent coins are gone, the
-// new ones added, the undo data stored, the height index filled in and the tip mark moved.
+// new ones added, the credits moved, the undo data stored, the height index filled in and the tip
+// mark moved.
 //
 // Either everything happens, or nothing. That is the whole reason Pebble is here and not our own
 // code — after `kill -9` in the middle of this function, a state where the UTXO set does not match
 // the tip cannot arise.
 //
-// `undo` is what `chain.UTXOSet.Apply` returned — no validation happens here, that belongs in chain.
+// `undo` is what `chain.UTXOSet.Apply` returned for the same block. The store recomputes it through
+// chain.ApplyBlockTo: the credits a block writes are not in an undo, which keeps what was before.
 func (s *Store) ApplyBlock(b *chain.Block, undo *chain.BlockUndo) error {
-	id := b.Header.ID()
-	height := uint64(b.Header.Height)
-
-	// The linkage check. Without it a skipped block would silently break the UTXO set.
-	tip, err := s.Tip()
-	switch {
-	case errors.Is(err, ErrNotFound):
-		if height != 0 {
-			return fmt.Errorf("%w: the first applied block has to be the genesis, it is %d", ErrTipMismatch, height)
-		}
-	case err != nil:
-		return err
-	default:
-		if b.Header.PrevBlock != tip.ID {
-			return fmt.Errorf("%w: prev %x, tip %x", ErrTipMismatch, b.Header.PrevBlock[:6], tip.ID[:6])
-		}
-	}
-
-	batch := s.db.NewBatch()
-	defer batch.Close()
-
-	for _, e := range undo.Spent {
-		if err := batch.Delete(keyCoin(e.Outpoint.TxID, e.Outpoint.Index), nil); err != nil {
-			return fmt.Errorf("store: %w", err)
-		}
-	}
-	for _, op := range undo.Created {
-		c, ok := coinFromBlock(b, op, height)
-		if !ok {
-			return fmt.Errorf("store: the undo data mentions output %x:%d, which is not in the block",
-				op.TxID[:6], op.Index)
-		}
-		if err := batch.Set(keyCoin(op.TxID, op.Index), encodeCoin(c), nil); err != nil {
-			return fmt.Errorf("store: %w", err)
-		}
-	}
-	if err := batch.Set(keyWithID(prefixUndo, id), encodeUndo(undo), nil); err != nil {
-		return fmt.Errorf("store: %w", err)
-	}
-	if err := s.indexBlockTxs(batch, b, id); err != nil {
-		return err
-	}
-	if err := s.indexBlockAddrs(batch, b, undo, height); err != nil {
-		return err
-	}
-	if err := batch.Set(keyHeight(height), id[:], nil); err != nil {
-		return fmt.Errorf("store: %w", err)
-	}
-	if err := batch.Set(keyTip, encodeTip(Tip{ID: id, Height: height}), nil); err != nil {
-		return fmt.Errorf("store: %w", err)
-	}
-	if err := s.advanceHeaderTip(batch, id, height); err != nil {
-		return err
-	}
-	return batch.Commit(pebble.Sync)
+	_, err := s.ApplyBlockDirect(b)
+	return err
 }
 
 // RevertTip rolls back the block at the tip — for a reorg. Again one atomic batch.
@@ -391,6 +399,9 @@ func (s *Store) RevertTip() error {
 		if err := batch.Set(keyCoin(e.Outpoint.TxID, e.Outpoint.Index), encodeCoin(e.Coin), nil); err != nil {
 			return fmt.Errorf("store: %w", err)
 		}
+	}
+	if err := revertCredits(batch, undo); err != nil {
+		return fmt.Errorf("store: %w", err)
 	}
 	// The height index is **not deleted** here: it is the manifest of the active branch of headers,
 	// not a record of what is applied. Unwinding the UTXO set is only one step down, the headers stay.

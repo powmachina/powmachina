@@ -1,7 +1,7 @@
 {{define "address.html"}}{{template "top" .}}
 {{$a := .Data.Addr}}{{$d := .Data}}
 <dl class="props">
-  <dt>address</dt><dd>{{$a.Address}}</dd>
+  <dt>address</dt><dd class="addr-with-icon">{{icon $a.Address 40}}<span>{{$a.Address}}</span></dd>
   <dt>balance</dt><dd>{{cogs $a.BalanceCogs}} POWM</dd>
   <dt>received</dt><dd>{{cogs $a.ReceivedCogs}} POWM</dd>
   <dt>sent</dt><dd>{{cogs $a.SentCogs}} POWM</dd>

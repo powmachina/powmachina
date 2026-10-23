@@ -128,16 +128,27 @@ func (w *Wallet) assembleLocked(outs []chain.TxOut, pre []*Coin, add bool, chang
 		inSum += c.Value
 		used[c.Outpoint] = true
 	}
+	var spare []*Coin
 	if add {
 		for _, c := range w.spendableLocked() {
-			if inSum >= amount+feeFor(picked, outs, inSum-amount, feePerKB) && len(picked) > 0 {
-				break
+			if !used[c.Outpoint] {
+				spare = append(spare, c)
 			}
-			if used[c.Outpoint] {
-				continue
-			}
-			picked = append(picked, c)
-			inSum += c.Value
+		}
+	}
+	// pick adds the next spendable coin; false = there is none left.
+	pick := func() bool {
+		if len(spare) == 0 {
+			return false
+		}
+		picked = append(picked, spare[0])
+		inSum += spare[0].Value
+		spare = spare[1:]
+		return true
+	}
+	for len(picked) == 0 || inSum < amount+feeFor(picked, outs, inSum-amount, feePerKB) {
+		if !pick() {
+			break
 		}
 	}
 	if len(picked) == 0 {
@@ -159,29 +170,52 @@ func (w *Wallet) assembleLocked(outs []chain.TxOut, pre []*Coin, add bool, chang
 		}
 		return tx, pos
 	}
-	// The fee depends on the change (a small change = more weight) and the change on the fee. A few
-	// rounds are enough: the fee only grows in each round, so it terminates.
-	fee := feeFor(picked, outs, inSum-amount, feePerKB)
-	var tx *chain.Tx
-	pos := -1
-	for range 4 {
-		if inSum < amount+fee {
-			return nil, nil, 0, -1, fmt.Errorf("%w: available %s, needed %s (including fee %s)",
+	// settle finds the fee for the coins picked so far. The fee depends on the change (a small change =
+	// more weight) and the change on the fee, so it goes in rounds; the fee only grows from one round to
+	// the next. Near the dust limit the weight of the change can grow faster than the fee — no fee pays
+	// for such a change, so the remainder goes to the fee, as a tiny remainder does.
+	settle := func() (*chain.Tx, int, error) {
+		fee := feeFor(picked, outs, inSum-amount, feePerKB)
+		for range 32 {
+			if inSum-amount-fee < chain.DustLimit {
+				break
+			}
+			tx, pos := build(true, fee)
+			if err := w.signLocked(tx, picked); err != nil {
+				return nil, -1, err
+			}
+			need := txFee(tx, picked, feePerKB)
+			if need <= fee {
+				return tx, pos, nil
+			}
+			fee = need
+		}
+		if inSum < amount {
+			return nil, -1, fmt.Errorf("%w: available %s, needed %s (including fee %s)",
 				ErrNoFunds, FormatAmount(inSum), FormatAmount(amount+fee), FormatAmount(fee))
 		}
-		// A tiny remainder is not worth sending — it is added to the fee rather than to the UTXO set.
-		tx, pos = build(inSum-amount-fee >= chain.DustLimit, fee)
+		tx, pos := build(false, inSum-amount)
 		if err := w.signLocked(tx, picked); err != nil {
-			return nil, nil, 0, -1, err
+			return nil, -1, err
 		}
-		need := txFee(tx, picked, feePerKB)
-		if need <= fee {
+		if need := txFee(tx, picked, feePerKB); need > inSum-amount {
+			return nil, -1, fmt.Errorf("%w: available %s, needed %s (including fee %s)",
+				ErrNoFunds, FormatAmount(inSum), FormatAmount(amount+need), FormatAmount(need))
+		}
+		return tx, pos, nil
+	}
+	var tx *chain.Tx
+	var pos int
+	for {
+		var err error
+		tx, pos, err = settle()
+		if err == nil {
 			break
 		}
-		fee = need
-	}
-	if txFee(tx, picked, feePerKB) > fee {
-		return nil, nil, 0, -1, fmt.Errorf("%w: fee did not converge", ErrNoFunds)
+		// Not enough for the fee: one more coin, if there is one.
+		if !errors.Is(err, ErrNoFunds) || !pick() {
+			return nil, nil, 0, -1, err
+		}
 	}
 	if chain.TxStorageMass(inValues(picked), tx) > chain.MaxBlockStorageMass-chain.CoinbaseStorageMassReserve {
 		return nil, nil, 0, -1, fmt.Errorf("%w: amount is too small for the network", ErrAmountTooLow)

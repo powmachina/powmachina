@@ -17,8 +17,9 @@ const (
 	// HeaderSize is the size of a message frame: magic(4) + command(12) + length(4) + checksum(4).
 	HeaderSize = 24
 
-	// MaxMessageBytes is the payload cap. The largest legitimate message is a block (256 kB), so
-	// 1 MiB is a comfortable margin and still keeps memory under control.
+	// MaxMessageBytes is the payload cap. The largest legitimate message is a block with its
+	// settlement body (chain.MaxBlockWireBytes, 352 kB), so 1 MiB is a comfortable margin and still
+	// keeps memory under control.
 	MaxMessageBytes = 1 << 20
 
 	// Caps on the number of items in lists. Without them an `addr` or `headers` message is the
@@ -27,11 +28,11 @@ const (
 	MaxAddrPerMessage    = 1000
 	MaxInvPerMessage     = 5000
 	// MaxAttestHeights is the cap on the range attestations can be asked for at once.
-	// With a finality depth of 20 blocks, 64 heights is a threefold margin and the answer is capped
-	// at 64 × the quorum size of attestations.
+	// With a finality depth of 20 blocks, 64 heights is a threefold margin.
 	MaxAttestHeights = 64
-	// MaxAttestPerMessage is the cap on the number of attestations in one answer (64 heights × 9
-	// quorum members, rounded up) — a fixed cap, not trust in how many the peer sends.
+	// MaxAttestPerMessage is the cap on the number of attestations in one answer (64 heights × 10
+	// keys) — a fixed cap, not trust in how many the peer sends. A quorum with more keys than that
+	// is answered in part and the rest comes with the next request.
 	MaxAttestPerMessage = 640
 )
 
@@ -39,22 +40,24 @@ const (
 type Command string
 
 const (
-	CmdVersion      Command = "version"
-	CmdVerack       Command = "verack"
-	CmdPing         Command = "ping"
-	CmdPong         Command = "pong"
-	CmdGetAddr      Command = "getaddr"
-	CmdAddr         Command = "addr"
-	CmdInv          Command = "inv"
-	CmdGetData      Command = "getdata"
-	CmdGetHeaders   Command = "getheaders"
-	CmdHeaders      Command = "headers"
-	CmdBlock        Command = "block"
-	CmdTx           Command = "tx"
-	CmdAttestation  Command = "attest"   // a finality attestation
-	CmdEquivocation Command = "equivoc"  // proof of double signing
-	CmdGetAttest    Command = "getattst" // "send the attestations for these heights"
-	CmdAttestations Command = "attests"  // the answer: the attestations the peer has
+	CmdVersion    Command = "version"
+	CmdVerack     Command = "verack"
+	CmdPing       Command = "ping"
+	CmdPong       Command = "pong"
+	CmdGetAddr    Command = "getaddr"
+	CmdAddr       Command = "addr"
+	CmdInv        Command = "inv"
+	CmdGetData    Command = "getdata"
+	CmdGetHeaders Command = "getheaders"
+	CmdHeaders    Command = "headers"
+	CmdBlock      Command = "block"
+	CmdTx         Command = "tx"
+	// The finality messages carry the signer's key, not an index into a fixed quorum. They have
+	// new names, so a node from before the change ignores them rather than reading them wrong.
+	CmdAttestation  Command = "fattest"   // a finality attestation
+	CmdEquivocation Command = "fequivoc"  // proof of double signing
+	CmdGetAttest    Command = "fgetattst" // "send the attestations for these heights"
+	CmdAttestations Command = "fattests"  // the answer: the attestations the peer has
 )
 
 var (

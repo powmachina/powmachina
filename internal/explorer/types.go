@@ -35,6 +35,9 @@ type BlockSummary struct {
 	// row. A node that does not send the field at all is taken to have the body: a pointer
 	// tells "no" apart from "did not say".
 	Body *bool `json:"body"`
+	// Payout is the address of the miner who closed the block, Shares how many shares it settles.
+	Payout string `json:"payout"`
+	Shares int    `json:"shares"`
 }
 
 // Pending says the node does not have this block's body yet, so there are no transactions and
@@ -62,6 +65,31 @@ type Block struct {
 	Stale         bool     `json:"stale"`
 	Size          int      `json:"size"`
 	Txs           []string `json:"txs"`
+	// Payout is who closed the block, ShareWeight the weight its own share claims.
+	Payout      string `json:"payout"`
+	ShareWeight uint8  `json:"share_weight"`
+	// Settlement is who the shares the block settles belong to; nil = it settles none.
+	Settlement *ShareTally `json:"settlement"`
+}
+
+// ShareTally is shares summed by miner (getblock's settlement, getsharepool).
+type ShareTally struct {
+	Shares     int          `json:"shares"`
+	Units      uint64       `json:"units"`
+	MinerCount int          `json:"miner_count"`
+	Miners     []MinerShare `json:"miners"`
+}
+
+type MinerShare struct {
+	Address string `json:"address"`
+	Shares  int    `json:"shares"`
+	Units   uint64 `json:"units"`
+}
+
+// SharePool is getsharepool: the shares the node holds for the next blocks.
+type SharePool struct {
+	ShareTally
+	TakesShares bool `json:"takes_shares"`
 }
 
 type VIn struct {

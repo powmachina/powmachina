@@ -25,11 +25,11 @@ func sealedSpend(t *testing.T, height uint64, params NetParams) (*UTXOSet, *Bloc
 	}
 	spend.Witness = []Witness{{Items: [][]byte{sig}}}
 
-	txs := []*Tx{coinbaseTx(height, MinerSubsidy(height), params), spend}
+	txs := []*Tx{coinbaseTx(height, 0, params), spend}
 	b := &Block{Header: &Header{Version: 1, Height: uint32(height), Bits: RegtestTargetBits,
 		Time: 1_700_000_500}, Txs: txs}
-	SealCoinbase(txs, height, params)
-	b.Header.MerkleRoot = TxMerkleRoot(txs)
+	SealCoinbase(txs, CreditsRoot(0, nil))
+	b.Seal()
 	return u, b
 }
 
@@ -57,7 +57,7 @@ func TestWitnessCommitmentCatchesAChangedWitness(t *testing.T) {
 
 	changed := copyOf(t, b)
 	changed.Txs[1].Witness[0].Items[0][5] ^= 1
-	if changed.Header.ID() != b.Header.ID() || TxMerkleRoot(changed.Txs) != b.Header.MerkleRoot {
+	if changed.Header.ID() != b.Header.ID() || changed.CheckRoot() != nil {
 		t.Fatal("setup: the changed copy no longer matches the header")
 	}
 	if err := changed.CheckWitnesses(p); !errors.Is(err, ErrBadWitnessCommitment) {
@@ -94,7 +94,7 @@ func TestCoinbaseCarriesNoWitness(t *testing.T) {
 	u, b := sealedSpend(t, 10, p)
 	padded := copyOf(t, b)
 	padded.Txs[0].Witness = []Witness{{Items: [][]byte{{1, 2, 3}}}}
-	if padded.Header.ID() != b.Header.ID() || TxMerkleRoot(padded.Txs) != b.Header.MerkleRoot {
+	if padded.Header.ID() != b.Header.ID() || padded.CheckRoot() != nil {
 		t.Fatal("setup: the padded copy no longer matches the header")
 	}
 	if err := padded.CheckWitnesses(p); !errors.Is(err, ErrBadWitnessCommitment) {
@@ -113,7 +113,7 @@ func TestBlockWithoutACommitmentIsInvalid(t *testing.T) {
 	build := func(mutate func(cb *Tx)) (*UTXOSet, *Block) {
 		u, b := sealedSpend(t, h, p)
 		mutate(b.Txs[0])
-		b.Header.MerkleRoot = TxMerkleRoot(b.Txs)
+		b.Seal()
 		return u, b
 	}
 	cases := map[string]func(cb *Tx){
@@ -148,19 +148,17 @@ func TestBlockWithoutACommitmentIsInvalid(t *testing.T) {
 	}
 }
 
-// The rule starts at its height and not a block earlier: below it a block needs no commitment
-// and SealCoinbase adds none, so the blocks of an old chain stay valid and stay what they were.
+// The rule starts at its height and not a block earlier: below it the commitment output is there —
+// it carries the credit root too — but the witnesses are not checked against it, so the blocks of
+// an old chain stay valid and stay what they were.
 func TestWitnessCommitmentStartsAtItsHeight(t *testing.T) {
 	const fork = 50
 	p := RegTest
 	p.Forks = []ForkAt{{Fork: ForkWitnessCommitment, Height: fork}}
 
 	u, before := sealedSpend(t, fork-1, p)
-	if _, err := before.witnessCommitment(); err == nil {
-		t.Fatal("SealCoinbase wrote a commitment below the fork")
-	}
 	if err := before.ValidateBlock(u, p); err != nil {
-		t.Fatalf("a block below the fork without a commitment: %v", err)
+		t.Fatalf("a block below the fork: %v", err)
 	}
 	if err := before.CheckWitnesses(p); err != nil || before.WitnessesCommitted(p) {
 		t.Fatalf("below the fork there is nothing to check and nothing committed (%v)", err)
@@ -173,18 +171,14 @@ func TestWitnessCommitmentStartsAtItsHeight(t *testing.T) {
 	}
 
 	u, at := sealedSpend(t, fork, p)
-	if _, err := at.witnessCommitment(); err != nil {
-		t.Fatal("SealCoinbase wrote no commitment at the fork height")
-	}
 	if err := at.ValidateBlock(u, p); err != nil {
 		t.Fatalf("a sealed block at the fork height: %v", err)
 	}
-	// The same block built the old way is refused from this height on.
-	never := p
-	never.Forks = nil
-	u, old := sealedSpend(t, fork, never)
-	if err := old.ValidateBlock(u, p); !errors.Is(err, ErrNoWitnessCommitment) {
-		t.Fatalf("an unsealed block at the fork height: %v, expected ErrNoWitnessCommitment", err)
+	// From this height on the commitment vouches for the witnesses.
+	changed = copyOf(t, at)
+	changed.Txs[1].Witness[0].Items[0][5] ^= 1
+	if err := changed.CheckWitnesses(p); !errors.Is(err, ErrBadWitnessCommitment) {
+		t.Fatalf("a changed witness at the fork height: %v, expected ErrBadWitnessCommitment", err)
 	}
 }
 
@@ -193,14 +187,14 @@ func TestWitnessCommitmentStartsAtItsHeight(t *testing.T) {
 func TestSealCoinbaseKeepsOneDataOutput(t *testing.T) {
 	p := RegTest
 	const h = 10
-	cb := coinbaseTx(h, MinerSubsidy(h), p)
+	cb := coinbaseTx(h, 0, p)
 	cb.Outputs = append(cb.Outputs, TxOut{ScriptVersion: ScriptVersionData, Script: []byte("x")})
 	txs := []*Tx{cb}
 	n := len(cb.Outputs)
 
-	SealCoinbase(txs, h, p)
+	SealCoinbase(txs, CreditsRoot(0, nil))
 	first := cb.TxID()
-	SealCoinbase(txs, h, p)
+	SealCoinbase(txs, CreditsRoot(0, nil))
 	if len(cb.Outputs) != n || cb.TxID() != first {
 		t.Fatalf("%d outputs after sealing twice, expected %d and the same txid", len(cb.Outputs), n)
 	}

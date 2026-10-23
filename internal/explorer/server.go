@@ -1,6 +1,7 @@
 package explorer
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"embed"
@@ -8,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -89,18 +91,21 @@ func (s *Server) funcs() template.FuncMap {
 		"hashrate":  FormatHashrate,
 		"algo":      AlgoName,
 		// addf/subf: the template draws an SVG chart and shifts coordinates by a few pixels
-		"addf":     func(a, b float64) float64 { return a + b },
-		"subf":     func(a, b float64) float64 { return a - b },
-		"bytes":    FormatBytes,
-		"time":     FormatTime,
-		"permille": Permille,
-		"short":    Short,
-		"bar":      Bar,
-		"since":    func(u int64) string { return Since(u, time.Now()) },
-		"url":      func(p string) string { return s.cfg.BasePath + p },
-		"cssurl":   func() string { return s.cfg.BasePath + s.cssPath },
-		"add":      func(a, b int) int { return a + b },
-		"upper":    strings.ToUpper,
+		"addf":      func(a, b float64) float64 { return a + b },
+		"subf":      func(a, b float64) float64 { return a - b },
+		"bytes":     FormatBytes,
+		"time":      FormatTime,
+		"permille":  Permille,
+		"short":     Short,
+		"bar":       Bar,
+		"since":     func(u int64) string { return Since(u, time.Now()) },
+		"url":       func(p string) string { return s.cfg.BasePath + p },
+		"cssurl":    func() string { return s.cfg.BasePath + s.cssPath },
+		"add":       func(a, b int) int { return a + b },
+		"upper":     strings.ToUpper,
+		"icon":      iconHTML,
+		"mosaic":    Mosaic,
+		"unitshare": unitShare,
 	}
 }
 
@@ -120,6 +125,7 @@ func (s *Server) Handler() http.Handler {
 		http.Redirect(w, r, s.cfg.BasePath+"/algorithms", http.StatusMovedPermanently)
 	})
 	mux.HandleFunc("GET "+b+"/richlist", s.handleRichList)
+	mux.HandleFunc("GET "+b+"/shares", s.handleShares)
 	mux.HandleFunc("GET "+b+"/search", s.handleSearch)
 	mux.HandleFunc("GET "+b+s.cssPath, s.handleCSS)
 	// The plain address works too, for anything that links the stylesheet without the fingerprint.
@@ -187,6 +193,14 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, name, title, tab
 			p.Network = info.Network
 		}
 	}
+	// The page is rendered whole before anything is sent. A template that fails half way otherwise
+	// went out as half a page with status 200, and the error was lost.
+	var buf bytes.Buffer
+	if err := s.tmpl.ExecuteTemplate(&buf, name, p); err != nil {
+		log.Printf("explorer: rendering %s: %v", name, err)
+		http.Error(w, "The page could not be rendered.", http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	// The explorer is public and the page changes with every block. A short cache keeps the load on the
 	// node in check without showing a stale tip.
@@ -195,10 +209,7 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, name, title, tab
 	// cookie — a shared cache would otherwise hand somebody else's theme to a visitor.
 	w.Header().Set("Cache-Control", "private, max-age=10")
 	w.Header().Set("Vary", "Cookie")
-	if err := s.tmpl.ExecuteTemplate(w, name, p); err != nil {
-		// The header has already been sent, so no status can be returned here — the log is all that is left.
-		return
-	}
+	_, _ = w.Write(buf.Bytes())
 }
 
 // fail renders the error page with the right status code.
@@ -410,7 +421,7 @@ func (s *Server) handleBlock(w http.ResponseWriter, r *http.Request) {
 }
 
 // The caps on the lists of transactions. Each one is a call to the node, so without them a full
-// block (256 kB, hundreds of transactions) would turn rendering the page into hundreds of calls.
+// block (96 kB of transactions, hundreds of them) would turn rendering the page into hundreds of calls.
 const (
 	recentTxBlocks = 10
 	recentTxLimit  = 50

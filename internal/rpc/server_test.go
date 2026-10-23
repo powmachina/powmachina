@@ -20,18 +20,17 @@ import (
 
 // fakeBackend is a minimal node for the RPC tests.
 type fakeBackend struct {
-	attestations []chain.Attestation
-	height       uint64
-	submitted    []*chain.Tx
-	submitErr    error
-	finalized    bool
-	txs          map[[32]byte]txEntry
-	addr         map[string]addrEntry
-	rich         []store.RichEntry
-	supply       int64
-	lanes        chain.LaneStats
-	forks        chain.ForkStatus
-	coins        map[chain.Outpoint]chain.Coin
+	height    uint64
+	submitted []*chain.Tx
+	submitErr error
+	finalized bool
+	txs       map[[32]byte]txEntry
+	addr      map[string]addrEntry
+	rich      []store.RichEntry
+	supply    int64
+	lanes     chain.LaneStats
+	forks     chain.ForkStatus
+	coins     map[chain.Outpoint]chain.Coin
 	// sync state for getinfo; zeros mean "synced" (see SyncState)
 	syncPeers   int
 	syncBest    uint64
@@ -120,8 +119,12 @@ func (f *fakeBackend) SubmitTx(tx *chain.Tx) error {
 	f.submitted = append(f.submitted, tx)
 	return nil
 }
-func (f *fakeBackend) AllowedLanes() []mh.Lane         { return []mh.Lane{mh.LaneC, mh.LaneG} }
-func (f *fakeBackend) SubmitBlock(*chain.Block) error  { return errors.New("no") }
+func (f *fakeBackend) AllowedLanes() []mh.Lane                { return []mh.Lane{mh.LaneC, mh.LaneG} }
+func (f *fakeBackend) SubmitBlock(*chain.Block) error         { return errors.New("no") }
+func (f *fakeBackend) SubmitShare(*chain.Share) (bool, error) { return false, errors.New("no") }
+func (f *fakeBackend) SharePool() (bool, map[[32]byte]chain.ShareTally) {
+	return false, nil
+}
 func (f *fakeBackend) TrustedWork() bool               { return true }
 func (f *fakeBackend) ClockSkew() (time.Duration, int) { return 0, 0 }
 
@@ -135,10 +138,13 @@ func (f *fakeBackend) SyncState() (int, uint64, uint64) {
 	return f.syncPeers, f.syncBest, f.syncApplied
 }
 
-// SubmitAttestation remembers what arrived — the tests check it.
-func (f *fakeBackend) SubmitAttestation(att chain.Attestation) error {
-	f.attestations = append(f.attestations, att)
-	return nil
+// FinalityStatus: a quorum of three keys, 700 of 1 000 of the weight signed, this node holds 250.
+func (f *fakeBackend) FinalityStatus() FinalityStatus {
+	if !f.finalized {
+		return FinalityStatus{Enabled: true, Window: 720}
+	}
+	return FinalityStatus{Enabled: true, Window: 720, Key: &[32]byte{7}, PendingHeight: f.height - 20,
+		PendingBlock: [32]byte{8}, Members: 3, Total: 1000, Signed: 700, Own: 250}
 }
 func (f *fakeBackend) StratumInfo() (any, error) { return nil, errors.New("no") }
 func (f *fakeBackend) HashrateSeries(_, _, _ int) chain.HashrateSeries {
@@ -262,6 +268,11 @@ func TestGetFinality(t *testing.T) {
 	res, _ = call(t, s, "", "getfinality", nil)
 	if !res["finalized"].(bool) || res["height"].(float64) != 80 {
 		t.Fatalf("after finalization expected height 80, got %v", res)
+	}
+	q, _ := res["quorum"].(map[string]any)
+	if res["window"].(float64) != 720 || q["members"].(float64) != 3 ||
+		q["signed_permille"].(float64) != 700 || q["own_permille"].(float64) != 250 {
+		t.Fatalf("the quorum: %v", res)
 	}
 }
 
@@ -408,7 +419,7 @@ func TestGetRawTransactionResolvesPrevouts(t *testing.T) {
 			Header: &chain.Header{Version: 1, Height: height, Time: 1_700_000_000, Lane: mh.LaneC},
 			Txs:    txs,
 		}
-		b.Header.MerkleRoot = chain.TxMerkleRoot(b.Txs)
+		b.Seal()
 		return b
 	}
 	cbBlk, spendBlk := mk(100, cb), mk(101, spend)
@@ -492,7 +503,7 @@ func TestGetRawTransactionCoinbaseHasNoFee(t *testing.T) {
 		Header: &chain.Header{Version: 1, Height: 50, Time: 1_700_000_000, Lane: mh.LaneG},
 		Txs:    []*chain.Tx{cb},
 	}
-	blk.Header.MerkleRoot = chain.TxMerkleRoot(blk.Txs)
+	blk.Seal()
 
 	be := &fakeBackend{height: 60, txs: map[[32]byte]txEntry{id: {tx: cb, blk: blk, idx: 0}}}
 	srv := NewServer(be, "secret")
@@ -722,7 +733,7 @@ func TestPositionalParamsWorkLikeNamed(t *testing.T) {
 		Header: &chain.Header{Version: 1, Height: 50, Time: 1_700_000_000, Lane: mh.LaneG},
 		Txs:    []*chain.Tx{cb},
 	}
-	blk.Header.MerkleRoot = chain.TxMerkleRoot(blk.Txs)
+	blk.Seal()
 	be := &fakeBackend{height: 60, txs: map[[32]byte]txEntry{id: {tx: cb, blk: blk, idx: 0}}}
 	srv := NewServer(be, "secret")
 

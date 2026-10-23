@@ -21,7 +21,7 @@ var (
 //
 //   - LockTime is a height: the transaction may go into a block at that height or above, and into
 //     none below. Zero is no lock. A lock by wall-clock time was left out: a height says the same
-//     thing at 120 s a block, and it needs nothing but the block's own header to check.
+//     thing at 30 s a block, and it needs nothing but the block's own header to check.
 //   - Sequence is reserved and has to be zero. It is kept in the format — and in what is signed —
 //     so that a later fork can give it a meaning (a lock relative to the spent output is what
 //     payment channels need) without changing how a transaction is laid out.

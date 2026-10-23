@@ -18,17 +18,16 @@
 set -euo pipefail
 
 # The pinned builder. Changing it changes what comes out — hence the digest is in the repo
-# and not "whatever is under :1.26 today".
-BUILDER=golang@sha256:a688600ca24f8a4d3ca77f95b0dd40704a9fc787c826660eb7ba0b641b8b175d
-BINARIES=(powmachinad powmachina-wallet-cli powmachina-wallet-rpc powmachina-miner powmachina-finality-signer)
+# and not "whatever is under :1.27 today".
+BUILDER=golang@sha256:972b4110ba0f47539a975c31e52c64765e1ff19f2d74469ae4a595c6676e80a5
+BINARIES=(powmachinad powmachina-wallet-cli powmachina-wallet-rpc powmachina-miner)
 # -X main.version stamps the version into the miner, which is the one binary that prints it and sends
 # it to a pool as its user agent. Without it every released miner says "dev": the person reporting a
 # problem cannot tell us what they are running, and a pool's worker list shows "dev" for everybody.
 # The flag is harmless for the binaries that have no such variable — the linker ignores it.
 # Windows: the node, the wallet and the miner. The miner mines both lanes there once `powm-cuda.dll`
 # sits next to it; the DLL is not built here (nvcc drives MSVC on Windows) — it comes from the
-# cuda-windows workflow artifact, after it was verified on a card (BUILDING.md). The quorum
-# signer is deliberately absent: its key belongs on a machine that runs around the clock.
+# cuda-windows workflow artifact, after it was verified on a card (BUILDING.md).
 WIN_BINARIES=(powmachinad powmachina-wallet-cli powmachina-wallet-rpc powmachina-miner)
 SIGN_KEY=${SIGN_KEY:-$HOME/.powmachina/release.key}
 

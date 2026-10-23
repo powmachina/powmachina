@@ -14,7 +14,7 @@ import (
 
 // The epoch cache.
 //
-// Every epoch (5 000 blocks ≈ 6.9 days) has **its own DAG for lane G and its own RandomX key
+// Every epoch (20 000 blocks ≈ 6.9 days) has **its own DAG for lane G and its own RandomX key
 // for lane C**. A node holding only one stops verifying blocks the moment the chain crosses an
 // epoch boundary — and since it rejects the headers, it looks like a stalled network rather
 // than a misconfiguration. So epochs are built on demand and at least two are kept.
@@ -27,8 +27,8 @@ const keepEpochs = 2
 //
 // Building the full DAG costs seconds and a gigabyte of memory. If it started only with the
 // block that already belongs to the new epoch, the node would freeze exactly when new blocks
-// are arriving — and at an epoch boundary everybody is in the same position. With a 120 s
-// block, 20 blocks is ~40 minutes of margin and it is paid once per epoch (6.9 days).
+// are arriving — and at an epoch boundary everybody is in the same position. With a 30 s
+// block, 20 blocks is ~10 minutes of margin and it is paid once per epoch (6.9 days).
 const warmAhead = 20
 
 // epochSet is everything needed to verify a block of one epoch.
@@ -168,8 +168,21 @@ func (c *epochCache) switchLocked(full bool) {
 		} else {
 			s.verifier = old.Lightened()
 		}
+		// RandomX follows the DAG: its dataset (2.1 GiB) is what makes a lane C share cost 5 ms
+		// instead of 35 — the difference between a node keeping up with the shares and not.
+		oldRx, oldHasher := s.rx, s.hasher
+		if rx, h, err := newRandomXSet(s.epoch, c.fastRandomX(full)); err != nil {
+			log.Printf("epoch %d: RandomX stays as it was: %v", s.epoch, err)
+			oldRx, oldHasher = nil, nil
+		} else {
+			s.rx, s.hasher = rx, h
+		}
 		s.mu.Unlock()
 		old.Close()
+		if oldHasher != nil {
+			oldHasher.Close()
+			oldRx.Close()
+		}
 	}
 	// Give the freed dataset (a gigabyte) back to the system right away, not whenever the GC remembers.
 	if !full {
@@ -201,20 +214,14 @@ func (c *epochCache) forHeight(height uint64) (*epochSet, error) {
 
 	var v *mh.Verifier
 	if c.full.Load() {
-		log.Printf("building epoch %d (full DAG + RandomX key) — this will take a moment", epoch)
+		log.Printf("building epoch %d (full DAG + RandomX dataset) — this will take a moment", epoch)
 		v = mh.NewVerifier(epoch, c.profile)
 	} else {
 		log.Printf("building epoch %d (light: DAG cache + RandomX key)", epoch)
 		v = mh.NewLightVerifier(epoch, c.profile)
 	}
-	rx, err := mh.NewRandomX(epoch, false)
+	rx, h, err := newRandomXSet(epoch, c.fastRandomX(c.full.Load()))
 	if err != nil {
-		v.Close()
-		return nil, fmt.Errorf("epoch %d: %w", epoch, err)
-	}
-	h, err := mh.NewHasherWithRandomX(rx)
-	if err != nil {
-		rx.Close()
 		v.Close()
 		return nil, fmt.Errorf("epoch %d: %w", epoch, err)
 	}
@@ -223,6 +230,28 @@ func (c *epochCache) forHeight(height uint64) (*epochSet, error) {
 	c.touchLocked(epoch)
 	c.evictLocked()
 	return s, nil
+}
+
+// fastRandomX says whether RandomX gets its full dataset: with the full DAG, on a network whose
+// DAG is the real one. The test profile (regtest, the tests) keeps the cache only — RandomX's
+// dataset is 2.1 GiB on every network, and a test runs dozens of nodes.
+func (c *epochCache) fastRandomX(full bool) bool {
+	return full && c.profile != mh.TestProfile
+}
+
+// newRandomXSet builds lane C's RandomX for an epoch and a hasher over it: with the full dataset
+// (`fast`, 2.1 GiB, filled on every core) or with the cache only.
+func newRandomXSet(epoch uint64, fast bool) (*mh.RandomX, *mh.Hasher, error) {
+	rx, err := mh.NewRandomX(epoch, fast)
+	if err != nil {
+		return nil, nil, err
+	}
+	h, err := mh.NewHasherWithRandomX(rx)
+	if err != nil {
+		rx.Close()
+		return nil, nil, err
+	}
+	return rx, h, nil
 }
 
 func (c *epochCache) touchLocked(epoch uint64) {

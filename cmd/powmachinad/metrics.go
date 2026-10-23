@@ -112,6 +112,14 @@ func (n *Node) metrics(now time.Time) string {
 	fh, _, fok := n.Finality()
 	g("powm_finality_height", "highest finalized height", float64(fh))
 	g("powm_finality_ok", "1 = the quorum has finalized something", bl(fok))
+	if st := n.FinalityStatus(); st.Members > 0 {
+		// The block on its way: how much of its quorum has signed and how much of it is this node.
+		// A node whose own share is large and stays unsigned is a pool whose signing broke.
+		g("powm_finality_members", "keys in the quorum of the block at the finality depth", float64(st.Members))
+		g("powm_finality_signed_ratio", "share of the quorum's weight that signed the block at the finality depth",
+			float64(st.Signed)/float64(st.Total))
+		g("powm_finality_own_ratio", "share of the quorum's weight held by this node's key", float64(st.Own)/float64(st.Total))
+	}
 	g("powm_trusted_work", "1 = the chain meets the network's MinChainWork", bl(n.chain.TrustedWork()))
 
 	// Chainwork is larger than a float64, so its logarithm is reported — that is enough for a
@@ -139,10 +147,11 @@ func (n *Node) metrics(now time.Time) string {
 	g("powm_mempool_bytes", "size of the mempool in bytes", float64(mpBytes))
 	g("powm_orphan_txs", "transactions waiting for a parent", float64(n.orphans.Len()))
 	g("powm_orphan_bytes", "size of the orphan pool in bytes", float64(n.orphans.Bytes()))
+	g("powm_sharepool_shares", "verified shares a block could still settle", float64(n.shares.Len()))
 
 	st := n.chain.LaneStats()
-	// The window is the longest one (chain.LaneWindows, 120 blocks today) and `fill` is how
-	// full it really is: a young chain does not have 120 blocks, and a share computed against
+	// The window is the longest one (chain.LaneWindows, 480 blocks today) and `fill` is how
+	// full it really is: a young chain does not have 480 blocks, and a share computed against
 	// the nominal window size would lie.
 	win := len(chain.LaneWindows) - 1
 	g("powm_lane_window_blocks", "size of the window the lane shares are computed from",

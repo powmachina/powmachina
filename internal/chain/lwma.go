@@ -6,7 +6,7 @@ import (
 )
 
 // LWMA-1 (zawy12) computed over the blocks of **the same lane**. Every lane has its own retarget
-// and its own history; the target time is LaneBlockTime (240 s), so two lanes give a 120 s block.
+// and its own history; the target time is LaneBlockTime (60 s), so two lanes give a 30 s block.
 
 var ErrShortWindow = errors.New("chain: too few blocks for a retarget")
 

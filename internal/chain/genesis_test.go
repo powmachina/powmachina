@@ -12,7 +12,7 @@ import (
 // Hence a golden test.
 func TestGenesisIDsAreFixed(t *testing.T) {
 	want := map[string]string{
-		"testnet": "59f614c9c994a653550809da0aa02e4637eb9911f5eb514e662931a9e68eba55",
+		"testnet": "1e7c79f3aa2c82da61e5254187cb0b035ff555f04154fe847e5c9503169de230",
 		// The regtest genesis depends on RegtestTargetBits (the bits are part of the header). A
 		// datadir made with different bits is refused as "a datadir from another network", which
 		// is exactly what this test protects.

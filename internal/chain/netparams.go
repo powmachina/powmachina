@@ -1,7 +1,6 @@
 package chain
 
 import (
-	"crypto/ed25519"
 	"encoding/hex"
 	"math/big"
 
@@ -48,12 +47,9 @@ type NetParams struct {
 	// name: `powm1…` on mainnet, `tpowm1…` on testnet, `rpowm1…` on regtest.
 	// The prefix is also a protection — an address from another network is refused on decoding.
 	Bech32HRP string
-	// FinalitySigners is the quorum that finalizes blocks (the finality spec). An empty quorum
-	// means finality is off and the chain runs on plain PoW — that is how it is today on both
-	// mainnet and testnet, until the keys sit with independent people.
-	FinalitySigners []ed25519.PublicKey
-	// FinalityThreshold is the number of signatures needed to finalize.
-	FinalityThreshold int
+	// FinalityWindow is how many blocks below a height make up the quorum that finalizes it
+	// (the finality spec). 0 = finality is off and the chain runs on plain PoW.
+	FinalityWindow uint64
 
 	// MinChainWork is the smallest cumulative chainwork a chain has to have for the node to treat
 	// it as trustworthy (hex, empty = not checked).
@@ -101,8 +97,7 @@ var (
 		// TODO(before genesis): the dev fee key.
 		DevFeeKey: nil,
 		// TODO(before genesis): finality quorum keys from independent operators.
-		FinalitySigners:   nil,
-		FinalityThreshold: FinalityThreshold,
+		FinalityWindow: FinalityWindow,
 		// A new network starts with every rule on.
 		Forks: []ForkAt{
 			{Fork: ForkWitnessCommitment, Height: 0},
@@ -133,15 +128,8 @@ var (
 		FixedSeeds:   []string{"2.28.131.131:17696", "37.27.149.235:17696"},
 		DevFeeScript: []byte("testnet-dev-fee-placeholder"),
 		DevFeeKey:    placeholderKey("testnet"),
-		// The testnet finality quorum: 9 keys, threshold 5 — the same numbers that will go to
-		// mainnet, so testnet exercises exactly those paths (the finality spec §4).
-		//
-		// The keys are **ours** and the signers run as separate processes
-		// (`powmachina-finality-signer`) on machines **without a node** — on mainnet they have to sit
-		// with independent people (§5), here it is deliberately our own infrastructure. Testnet
-		// finality is therefore not proof of independence, it is proof that the code works.
-		FinalitySigners:   testnetSignerKeys(),
-		FinalityThreshold: FinalityThreshold,
+		// The same window as mainnet, so testnet exercises exactly those paths (the finality spec).
+		FinalityWindow: FinalityWindow,
 		// Both values are produced by `scripts/bake-checkpoint.sh` and are re-baked before every
 		// release: the deeper the checkpoint, the less history can be slipped to a node syncing
 		// for the first time. The checkpoint sits on a block the finality quorum confirmed and
@@ -151,29 +139,34 @@ var (
 		// is "does this chain have at least as much work as the network had when this binary
 		// was made". Until a chain has both, the node does not defend it (anchoredLocked).
 		//
-		// Baked at height 1323.
-		MinChainWork: "1f98875b8",
-		Checkpoints: []Checkpoint{
-			{Height: 800, ID: mustID("abf5b0f5dd19d9c394129591c46deb67141932b3f5acf1f9df5b2ddb77b50d1b")},
+		// Empty until the chain is old enough to bake them.
+		MinChainWork: "",
+		Checkpoints:  nil,
+		// A new network starts with every rule on.
+		Forks: []ForkAt{
+			{Fork: ForkWitnessCommitment, Height: 0},
+			{Fork: ForkSignedNetwork, Height: 0},
+			{Fork: ForkLockTime, Height: 0},
+			{Fork: ForkStrictOutputs, Height: 0},
+			{Fork: ForkLaneDifficulty, Height: 0},
 		},
 	}
 
 	// RegTest has a trivial difficulty so it can be tested without waiting for blocks.
 	RegTest = NetParams{
-		Name:              "regtest",
-		Magic:             [4]byte{'P', 'W', 'M', 'R'},
-		PowLimitBits:      RegtestTargetBits,
-		P2PPort:           27696,
-		RPCPort:           27697,
-		BlocksPort:        27698,
-		StratumPort:       27699,
-		WalletRPCPort:     27695,
-		Bech32HRP:         "rpowm",
-		DevFeeScript:      []byte("regtest-dev-fee"),
-		DevFeeKey:         placeholderKey("regtest"),
-		FinalitySigners:   regtestSignerKeys(),
-		FinalityThreshold: FinalityThreshold,
-		DagProfile:        mh.TestProfile,
+		Name:           "regtest",
+		Magic:          [4]byte{'P', 'W', 'M', 'R'},
+		PowLimitBits:   RegtestTargetBits,
+		P2PPort:        27696,
+		RPCPort:        27697,
+		BlocksPort:     27698,
+		StratumPort:    27699,
+		WalletRPCPort:  27695,
+		Bech32HRP:      "rpowm",
+		DevFeeScript:   []byte("regtest-dev-fee"),
+		DevFeeKey:      placeholderKey("regtest"),
+		FinalityWindow: RegtestFinalityWindow,
+		DagProfile:     mh.TestProfile,
 		Forks: []ForkAt{
 			{Fork: ForkWitnessCommitment, Height: 0},
 			{Fork: ForkSignedNetwork, Height: 0},
@@ -199,56 +192,6 @@ func placeholderKey(network string) []byte {
 	return h[:]
 }
 
-// RegtestSignerSeed returns the seed of a quorum signer on regtest.
-//
-// The keys are **deliberately derivable**: regtest has to be reproducible and there is nothing on
-// it to protect. On mainnet the keys have to sit with independent people and only the public parts
-// go into the binary.
-func RegtestSignerSeed(index int) []byte {
-	seed := make([]byte, ed25519.SeedSize)
-	copy(seed, "powmachina-regtest-finality-sign")
-	seed[ed25519.SeedSize-1] = byte(index)
-	return seed
-}
-
-// RegtestSignerKey returns a signer's private key on regtest.
-func RegtestSignerKey(index int) ed25519.PrivateKey {
-	return ed25519.NewKeyFromSeed(RegtestSignerSeed(index))
-}
-
-// testnetSignerKeys is the testnet finality quorum. These are **public** keys, so nothing secret;
-// the private halves live on the signers' machines (the finality spec).
-func testnetSignerKeys() []ed25519.PublicKey {
-	hexKeys := []string{
-		"a4c0604e0d7c92a98b68ed2a91edc47c62fb4d5ad534cb418e0119df2f7638a1", // signer 0,
-		"a0727f3f58f004c4b0c43b01ce1d0f88dfb5c31952cbabab3481ba87666dba8f", // signer 1,
-		"a19e4bcfc62d4719e5c606b51de8605e8ea54db5e31fe896b32591084c607f63", // signer 2,
-		"c1cee5629001b54e968c575f91df2e2473d4c17de85ab9839df6c3f42d4bf594", // signer 3,
-		"776e9469c595cf3a15de927b1a050af14ce34a2ff5ad8192574634962015f5ff", // signer 4,
-		"2527413407a99c0393815da1ed81c39066b6a505b54528cf0a4a4fdd810a38df", // signer 5,
-		"a855eef487d6e970ce4b717f2d8122cda9e29528072df3ead095d00e41cbb5f5", // signer 6,
-		"34e4af895fcdc3df3d463ad885c75e4ec6e6ab2114a665ebcd3daa1758525ff4", // signer 7,
-		"7a9c105c8edc652fe316b486be5ccb8b87b6f1796473f7887c2a3a295c5b888a", // signer 8
-	}
-	out := make([]ed25519.PublicKey, 0, len(hexKeys))
-	for _, h := range hexKeys {
-		raw, err := hex.DecodeString(h)
-		if err != nil || len(raw) != ed25519.PublicKeySize {
-			panic("chain: corrupted testnet quorum key " + h)
-		}
-		out = append(out, ed25519.PublicKey(raw))
-	}
-	return out
-}
-
-func regtestSignerKeys() []ed25519.PublicKey {
-	out := make([]ed25519.PublicKey, FinalitySigners)
-	for i := range out {
-		out[i] = RegtestSignerKey(i).Public().(ed25519.PublicKey)
-	}
-	return out
-}
-
 // MinWork returns MinChainWork as a number. Empty or corrupted = no check.
 func (p NetParams) MinWork() *big.Int {
 	if p.MinChainWork == "" {
@@ -259,14 +202,6 @@ func (p NetParams) MinWork() *big.Int {
 		return nil
 	}
 	return w
-}
-
-// SignerSet assembles the network's quorum for FinalityState. It returns nil if the network does not use finality.
-func (p NetParams) SignerSet() *SignerSet {
-	if len(p.FinalitySigners) == 0 {
-		return nil
-	}
-	return &SignerSet{Keys: p.FinalitySigners, Threshold: p.FinalityThreshold}
 }
 
 // Checkpoint is a baked-in block: a height and its ID.

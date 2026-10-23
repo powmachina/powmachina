@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"crypto/ed25519"
 	"crypto/rand"
 	"fmt"
 	"log"
@@ -39,11 +40,19 @@ type Node struct {
 	datadir    string
 	catchingUp bool // DAG auto mode: the node is catching up on history (guarded by mu)
 	finality   *chain.FinalityState
-	signers    []int // indices in the quorum we sign for (on regtest there may be several)
+	// signer is the node's finality key (finality.go); its blocks are its seats in the quorum.
+	signer     *finalitySigner
+	noAttest   bool // the node keeps its key in its blocks but does not sign (tests)
+	seatMu     sync.Mutex
+	seats      map[[32]byte]chain.Seat    // block id → its seat (guarded by seatMu)
+	quorums    map[[32]byte]*chain.Quorum // block id → the quorum that finalizes it (guarded by seatMu)
+	finalityMu sync.Mutex                 // one writer of the finality state file at a time
 	addrs      *p2p.AddrMan
 	peers      *p2p.Manager
 	verifier   *mh.Verifier
 	epochs     *epochCache
+	settled    settledIndex     // what the recent blocks settled (settlement.go)
+	shares     *chain.SharePool // the verified shares a block could still settle
 	nonce      uint64
 	agent      string
 	nodeName   string
@@ -112,6 +121,17 @@ type Node struct {
 
 	mu    sync.Mutex
 	conns map[string]*p2p.Conn // connections something can be sent to
+	// fullDag are the connections whose peer said in its handshake that it holds the full DAG:
+	// the ones shares go to — a light node drops them (settlement.go).
+	fullDag map[string]bool
+	// shareLinks are the compact-share dictionaries of every connection (sharewire.go).
+	shareLinks map[string]*shareLink
+	// gossips are the connections that take part in address gossip (addrgossip.go).
+	gossips map[string]bool
+	// listenPort is the P2P port the node listens on, 0 when it does not; it announces it.
+	listenPort atomic.Uint32
+	// privatePeers are the -addnode peers on private addresses, set once by Bootstrap.
+	privatePeers []p2p.Address
 	// live are ALL open connections including those before the handshake. `conns` gets them
 	// only after the handshake, so without this Close would wait for a foreign peer's
 	// handshake (20 s).
@@ -157,6 +177,14 @@ func OpenNodeWith(params chain.NetParams, genesis *chain.Header, profile mh.DagP
 	}
 	n := newNode(params, genesis, profile, st)
 	n.datadir = datadir
+	if n.finality != nil {
+		signer, err := loadFinalitySigner(datadir)
+		if err != nil {
+			st.Close()
+			return nil, 0, err
+		}
+		n.signer = signer
+	}
 
 	// The genesis has to be in storage, otherwise the height index has nothing to stand on.
 	// It also catches a datadir from another network — a reason to refuse to start, not to overwrite it.
@@ -188,7 +216,12 @@ func OpenNodeWith(params chain.NetParams, genesis *chain.Header, profile mh.DagP
 	// Blocks stored on disk but not applied yet — a crash between writing a body and applying
 	// it is a normal state, not an error.
 	if applied, err := st.ApplyStored(height+1000, store.ApplyHooks{
-		Validate: func(b *chain.Block) error { return b.ValidateBlock(st, params) },
+		Validate: func(b *chain.Block) error {
+			if err := b.ValidateBlock(st, params); err != nil {
+				return err
+			}
+			return n.checkSettlement(b)
+		},
 	}); err != nil {
 		st.Close()
 		return nil, 0, err
@@ -228,6 +261,8 @@ func OpenNodeWith(params chain.NetParams, genesis *chain.Header, profile mh.DagP
 		log.Printf("address index done in %s", time.Since(t0).Round(time.Millisecond))
 	}
 
+	n.loadFinality()
+
 	// The mempool comes last: transactions are checked against a finished UTXO set and the
 	// height the node really stands on.
 	n.loadMempool(height, time.Now())
@@ -259,11 +294,11 @@ func newNode(params chain.NetParams, genesis *chain.Header, profile mh.DagProfil
 	if err != nil {
 		panic(err)
 	}
-	// The finality quorum is a property of the network. When the network has no keys, finality
-	// is off and the chain runs on plain PoW (the finality spec).
+	// Finality is a property of the network: without a window it is off and the chain runs on
+	// plain PoW (the finality spec).
 	var finality *chain.FinalityState
-	if set := params.SignerSet(); set != nil {
-		finality = chain.NewFinalityState(set)
+	if params.FinalityWindow > 0 {
+		finality = chain.NewFinalityState()
 	}
 	n := &Node{
 		params:   params,
@@ -272,6 +307,7 @@ func newNode(params chain.NetParams, genesis *chain.Header, profile mh.DagProfil
 		store:    st,
 		mempool:  chain.NewMempool(params),
 		orphans:  chain.NewOrphanPool(),
+		shares:   chain.NewSharePool(chain.DefaultSharePoolSize),
 		conns:    make(map[string]*p2p.Conn),
 		live:     make(map[*p2p.Conn]struct{}),
 		minerKey: minerPk[:],
@@ -286,8 +322,19 @@ func newNode(params chain.NetParams, genesis *chain.Header, profile mh.DagProfil
 		// one line about rejections per 10 s, with the count rejected in between
 		rejectLog: p2p.NewTokenBucket(0.1, 1, time.Now()),
 		clockLog:  p2p.NewTokenBucket(1.0/600, 1, time.Now()),
+		seats:     make(map[[32]byte]chain.Seat),
+		quorums:   make(map[[32]byte]*chain.Quorum),
 	}
 	n.peers.OnBan = n.markBanListDirty
+	n.chain.SetVotes(n.shares.Votes)
+	// A node in memory gets a key for its lifetime; OpenNode replaces it with the one in the datadir.
+	if finality != nil {
+		_, priv, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			panic(err)
+		}
+		n.signer = newFinalitySigner(priv, "")
+	}
 
 	return n
 }
@@ -414,6 +461,14 @@ func (n *Node) version() *p2p.VersionMsg {
 // and per-network limits, the number of unfinished handshakes and the connection rate. A
 // handshake costs a thread, memory and up to 20 seconds — nobody who would fail anyway may get one.
 func (n *Node) Listen(ln net.Listener) {
+	// Only a node listening where the internet reaches it announces itself. One listening on a
+	// private address (a hidden node that its siblings in a VPN connect to) would otherwise be
+	// announced under the public address its peers see it from — where nothing answers, and which
+	// is exactly what it is hidden to keep to itself. A closed deployment (-allow-private) is
+	// private throughout, so there it does.
+	if a, ok := ln.Addr().(*net.TCPAddr); ok && (a.IP.IsUnspecified() || p2p.Routable(a.IP) || n.addrs.AllowPrivate) {
+		n.listenPort.Store(uint32(a.Port))
+	}
 	for {
 		c, err := ln.Accept()
 		if err != nil {
@@ -491,7 +546,7 @@ func (n *Node) serve(conn *p2p.Conn, ticket *p2p.Ticket) {
 	}
 	ticket.Established()
 	defer n.peers.Remove(addr)
-	n.addConn(addr, conn)
+	n.addConn(addr, conn, peer)
 	defer n.removeConn(addr)
 	log.Printf("peer %v connected (%s, height %d)", addr.IP, remote.UserAgent, remote.StartHeight)
 
@@ -699,10 +754,24 @@ func (n *Node) handle(conn *p2p.Conn, peer *p2p.Peer, msg *p2p.Message) error {
 			n.peers.Misbehaving(peer, p2p.MisbehaviorBadMessage)
 			return err
 		}
-		// The proof is verified by inserting both attestations — if they are valid, the state
-		// records the conflict itself and turns finality off for that height.
-		_ = n.acceptAttestation(ev.First, addrOf(peer))
-		return n.acceptAttestation(ev.Second, addrOf(peer))
+		n.acceptEquivocation(ev, addrOf(peer))
+		return nil
+
+	case p2p.CmdGetAddr:
+		n.answerGetAddr(conn, peer)
+		return nil
+
+	case p2p.CmdAddr:
+		list, err := p2p.DecodeAddr(msg.Payload)
+		if err != nil {
+			n.peers.Misbehaving(peer, p2p.MisbehaviorBadMessage)
+			return err
+		}
+		n.acceptAddrs(peer, list)
+		return nil
+
+	case p2p.CmdShares:
+		return n.receiveShares(peer, msg.Payload)
 
 	case p2p.CmdTx:
 		tx, err := p2p.DecodeTx(msg.Payload)
@@ -851,74 +920,6 @@ func (n *Node) RequestHeaders(conn *p2p.Conn) error {
 	return conn.Send(&p2p.Message{Command: p2p.CmdGetHeaders, Payload: payload})
 }
 
-// acceptAttestation verifies a finality attestation, files it and relays it on.
-//
-// An attestation for a block we do not have is not dropped — the quorum may be ahead.
-// Finality only moves once we really have the block on our branch (the finality spec §2).
-func (n *Node) acceptAttestation(att chain.Attestation, from string) error {
-	if n.finality == nil {
-		return nil // the network does not use finality
-	}
-	ev, err := n.finality.Add(att)
-	if ev != nil {
-		log.Printf("PROOF OF DOUBLE SIGNING: %v", ev)
-		if payload, encErr := p2p.EncodeEquivocation(ev); encErr == nil {
-			n.announceRaw(p2p.CmdEquivocation, payload, "")
-		}
-		return nil
-	}
-	if err != nil {
-		return nil // an invalid signature is not a reason to ban, it may be an old version of the quorum
-	}
-
-	before, _, hadFinal := n.finality.Finalized()
-	_, height, _ := n.chain.Tip()
-	n.finality.Update(height, n.chain.BlockIDAt)
-	if after, id, ok := n.finality.Finalized(); ok && (!hadFinal || after > before) {
-		log.Printf("finality advanced to height %d (%x)", after, id[:6])
-	}
-
-	if payload, err := p2p.EncodeAttestation(att); err == nil {
-		n.announceRaw(p2p.CmdAttestation, payload, from)
-	}
-	return nil
-}
-
-// SignAs turns on the quorum signer role.
-//
-// On mainnet a node should sign at most for itself and the key belongs somewhere other than
-// the machine running the node (the finality spec §5). Several indices at once only make sense
-// on regtest, where the whole quorum is derivable and the point is to be able to try finality
-// out in a single process.
-func (n *Node) SignAs(indexes ...int) {
-	n.mu.Lock()
-	n.signers = append([]int(nil), indexes...)
-	n.mu.Unlock()
-}
-
-// attestTip signs the block at depth FinalityDepth if we are a member of the quorum.
-func (n *Node) attestTip() {
-	n.mu.Lock()
-	signers := append([]int(nil), n.signers...)
-	n.mu.Unlock()
-	if len(signers) == 0 || n.finality == nil {
-		return
-	}
-	_, height, _ := n.chain.Tip()
-	if height < chain.FinalityDepth {
-		return
-	}
-	target := height - chain.FinalityDepth
-	id, ok := n.chain.BlockIDAt(target)
-	if !ok {
-		return
-	}
-	for _, idx := range signers {
-		att := chain.Sign(chain.RegtestSignerKey(idx), uint8(idx), target, id)
-		_ = n.acceptAttestation(att, "")
-	}
-}
-
 // announceRaw sends a finished message to every peer except the source.
 func (n *Node) announceRaw(cmd p2p.Command, payload []byte, except string) {
 	n.mu.Lock()
@@ -964,11 +965,12 @@ func (n *Node) acceptTx(peer *p2p.Peer, tx *chain.Tx, from string) error {
 }
 
 // maxBlockPushBytes is the cap up to which a block is pushed to peers whole instead of being
-// announced. Today's blocks are hundreds of bytes and the cap is three orders of magnitude
-// above that; it is here so that a full 256 kB block × every peer never becomes the default.
-// Above it the peer gets an `inv` and pulls what it wants — which is also where compact blocks
-// (BIP152) would belong one day.
-const maxBlockPushBytes = 64 << 10
+// announced. A block of the Sharepool carries its settlement body, ~45 kB at 3,000 shares, and at a
+// 30 s block every round trip of an `inv` is a share of the orphan rate — so the usual block is
+// pushed. The cap is here so that a block at its limit (chain.MaxBlockWireBytes) × every peer never
+// becomes the default. Above it the peer gets an `inv` and pulls what it wants — which is also where
+// compact blocks (the shares a peer already has, by id) would belong one day.
+const maxBlockPushBytes = 128 << 10
 
 // announceBlock hands a new block to the peers **whole**: one header message and the body
 // right behind it.
@@ -1040,15 +1042,30 @@ func (n *Node) announce(items []p2p.InvItem, except string) {
 	}
 }
 
-func (n *Node) addConn(addr p2p.Address, c *p2p.Conn) {
+func (n *Node) addConn(addr p2p.Address, c *p2p.Conn, peer *p2p.Peer) {
 	n.mu.Lock()
 	n.conns[addr.String()] = c
+	if n.fullDag == nil {
+		n.fullDag = make(map[string]bool)
+		n.gossips = make(map[string]bool)
+		n.shareLinks = make(map[string]*shareLink)
+	}
+	n.shareLinks[addr.String()] = newShareLink(c)
+	if peer != nil && peer.Version != nil && peer.Version.Services&p2p.ServiceFullDag != 0 {
+		n.fullDag[addr.String()] = true
+	}
+	if peer != nil && addrPeer(peer) {
+		n.gossips[addr.String()] = true
+	}
 	n.mu.Unlock()
 }
 
 func (n *Node) removeConn(addr p2p.Address) {
 	n.mu.Lock()
 	delete(n.conns, addr.String())
+	delete(n.fullDag, addr.String())
+	delete(n.gossips, addr.String())
+	delete(n.shareLinks, addr.String())
 	n.mu.Unlock()
 }
 
@@ -1120,6 +1137,9 @@ func (n *Node) SubmitBlock(blk *chain.Block) error {
 	// body would otherwise move the header tip to a block that will never have one.
 	if err := blk.ValidateBlock(n.store, n.params); err != nil {
 		return fmt.Errorf("invalid body: %w", err)
+	}
+	if err := n.checkSettlement(blk); err != nil {
+		return fmt.Errorf("invalid settlement: %w", err)
 	}
 	pow, err := n.pow(uint64(h.Height))
 	if err != nil {
@@ -1201,7 +1221,7 @@ func (n *Node) SyncFrom(hostport string) error {
 		return err
 	}
 	defer n.peers.Remove(addr)
-	n.addConn(addr, conn)
+	n.addConn(addr, conn, peer)
 	defer n.removeConn(addr)
 	n.addrs.Add(addr, addr.IP)
 	n.addrs.Good(addr)
@@ -1286,28 +1306,38 @@ func (nd *Node) MineBlocks(count int) error {
 		}
 		selected := nd.mempool.Select(chain.MaxBlockBytes-chain.MaxCoinbaseBytes,
 			chain.MaxBlockStorageMass-chain.CoinbaseStorageMassReserve)
-		var fees int64
-		for _, tx := range selected {
-			if e, ok := nd.mempool.Get(tx.TxID()); ok {
-				fees += e.Fee
-			}
-		}
 		nd.mu.Lock()
 		minerKey := nd.minerKey
 		nd.mu.Unlock()
-		cb := chain.BuildCoinbase(height+1, fees, minerKey, extra, nd.params)
+		payouts, err := chain.CreditPayouts(height+1, nd.store)
+		if err != nil {
+			return err
+		}
+		cb := chain.BuildCoinbase(height+1, payouts, extra, nd.params)
 		blk := &chain.Block{
 			Header: &chain.Header{Version: nd.params.BlockVersion(height + 1), PrevBlock: tipID, Bits: bits,
 				Height: uint32(height + 1), Lane: lane},
 			Txs: append([]*chain.Tx{cb}, selected...),
 		}
-		chain.SealCoinbase(blk.Txs, height+1, nd.params)
+		copy(blk.Share.Payout[:], minerKey)
+		// The heaviest share a block can be: a block is the only share this miner publishes, so
+		// it is worth the most units it can claim (the Sharepool spec §2.2).
+		blk.Share.Weight = chain.MaxShareWeight
+		if key := nd.FinalityKey(); key != nil {
+			blk.Share.FinalityKey = *key
+		}
+		settlement, err := nd.templateSettlement(tipID, height)
+		if err != nil {
+			return err
+		}
+		blk.Settlement = *settlement
+		chain.SealCoinbase(blk.Txs, nd.store.CreditsRoot())
 		pow, err := nd.pow(height + 1)
 		if err != nil {
 			return err
 		}
+		blk.Seal()
 		h := blk.Header
-		h.MerkleRoot = chain.TxMerkleRoot(blk.Txs)
 		// The clock, or the earliest time the chain allows when blocks come faster than it. The
 		// bound is never above the parent's time, so mining hundreds of blocks within a second
 		// on regtest does not walk the chain into the future and past the allowed drift.

@@ -25,9 +25,10 @@ func chainOnGenesis(n int) []*chain.Block {
 				Version: 1, PrevBlock: prev, Bits: chain.RegtestTargetBits,
 				Height: uint32(h), Time: g.Time + uint32(h)*120, Lane: 1,
 			},
-			Txs: []*chain.Tx{chain.BuildCoinbase(h, 0, key, extra, params)},
+			Txs: []*chain.Tx{chain.BuildCoinbase(h, nil, extra, params)},
 		}
-		b.Header.MerkleRoot = chain.TxMerkleRoot(b.Txs)
+		b.Txs[0].Outputs = append(b.Txs[0].Outputs, chain.TxOut{Value: 1, Script: key})
+		b.Seal()
 		prev = b.Header.ID()
 		blocks = append(blocks, b)
 	}

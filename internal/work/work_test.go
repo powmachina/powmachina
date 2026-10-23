@@ -1,6 +1,7 @@
 package work
 
 import (
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"testing"
@@ -11,7 +12,7 @@ import (
 
 func template(height uint64) *Template {
 	return &Template{Height: height, Lane: "G", Bits: fmt.Sprintf("%08x", chain.RegtestTargetBits),
-		PrevBlock: strings.Repeat("00", 32), MinTime: 1_700_000_001}
+		PrevBlock: strings.Repeat("00", 32), MinTime: 1_700_000_001, CreditRoot: strings.Repeat("00", 32)}
 }
 
 // A header carries its height in 32 bits. A template with a height past that would be cut short in
@@ -60,5 +61,29 @@ func TestJobCarriesTheVersionFromTheTemplate(t *testing.T) {
 	// The version is part of what is hashed, so the PoW input has to carry it too.
 	if got := uint32(j.PoW[0]) | uint32(j.PoW[1])<<8 | uint32(j.PoW[2])<<16 | uint32(j.PoW[3])<<24; got != signalling.Version {
 		t.Fatalf("the PoW input carries version %#x, expected %#x", got, signalling.Version)
+	}
+}
+
+// The payout and the finality key are under the PoW: the block a job makes carries them in its
+// share commitment and its root commits to them.
+func TestJobCommitsToThePayoutAndTheKey(t *testing.T) {
+	payout := make([]byte, 32)
+	payout[0] = 7
+	tpl := template(5)
+	key := [32]byte{9}
+	tpl.FinalityKey = hex.EncodeToString(key[:])
+	j, err := Build(tpl, payout, chain.RegTest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := j.Block(1)
+	if err := b.CheckRoot(); err != nil {
+		t.Fatalf("the job's block: %v", err)
+	}
+	if b.Share.Payout[0] != 7 || b.Share.FinalityKey != key {
+		t.Fatal("the commitment does not carry the payout and the key")
+	}
+	if _, err := Build(template(5), payout[:20], chain.RegTest); err == nil {
+		t.Fatal("a payout that is not a 32 B program was taken")
 	}
 }

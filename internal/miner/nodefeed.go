@@ -3,6 +3,7 @@ package miner
 import (
 	"errors"
 	"log"
+	"math/big"
 	"sync"
 	"time"
 
@@ -16,11 +17,14 @@ import (
 type Source interface {
 	Template(lane string) (*nodeclient.Template, error)
 	SubmitBlock(b *chain.Block) error
+	// SubmitShare sends a share and returns whether it is a block too.
+	SubmitShare(s *chain.Share) (bool, error)
 	Tip() (uint64, [32]byte, error)
 }
 
 // NodeFeed is solo mining against your own node: the template through gettemplate, the coinbase to your
-// own address (work.Build), the block through submitblock.
+// own address (work.BuildShares), every share through submitshare and the block through submitblock.
+// A node that takes no shares (a light one) gets the block alone.
 type NodeFeed struct {
 	Src     Source
 	Payout  []byte
@@ -36,6 +40,40 @@ type NodeFeed struct {
 	done   map[*work.Job]bool
 	kick   chan struct{}
 	logged map[mh.Lane]bool
+	// rate is each lane's hashrate as the miner measured it (ReportHashrate), weight the share
+	// weight its jobs were last built with.
+	rate   map[mh.Lane]float64
+	weight map[mh.Lane]uint8
+}
+
+// shareRate is how many shares a second a lane aims to submit at most. The weight goes up until it
+// does: a share of weight k counts as 2^k, so the miner gets the same for its work, and its node
+// and the network verify fewer of them.
+const shareRate = 0.5
+
+// shareWeight is the lightest weight at which `hps` hashes a second find at most shareRate shares
+// on a block of `bits`. An unknown rate gets the heaviest weight.
+func shareWeight(hps float64, bits uint32) uint8 {
+	work, err := chain.Work(bits)
+	if hps <= 0 || err != nil {
+		return chain.MaxShareWeight
+	}
+	hashes, _ := new(big.Float).SetInt(work).Float64() // hashes per block
+	rate := hps * chain.SharesPerLaneBlock / hashes    // shares a second at weight 0
+	k := uint8(0)
+	for k < chain.MaxShareWeight && rate > shareRate {
+		rate /= 2
+		k++
+	}
+	return k
+}
+
+// ReportHashrate implements miner.HashrateReporter: the next jobs of the lane are built for it.
+func (f *NodeFeed) ReportHashrate(lane mh.Lane, hps float64) {
+	f.init()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.rate[lane] = hps
 }
 
 func (f *NodeFeed) init() {
@@ -45,6 +83,8 @@ func (f *NodeFeed) init() {
 		f.done = map[*work.Job]bool{}
 		f.kick = make(chan struct{}, 1)
 		f.logged = map[mh.Lane]bool{}
+		f.rate = map[mh.Lane]float64{}
+		f.weight = map[mh.Lane]uint8{}
 	}
 	if f.Refresh <= 0 {
 		f.Refresh = 20 * time.Second
@@ -125,7 +165,20 @@ func (f *NodeFeed) job(l mh.Lane) (*work.Job, error) {
 	if err != nil {
 		return nil, err
 	}
-	return work.Build(t, f.Payout, f.Params)
+	bits, err := work.ParseBits(t.Bits)
+	if err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	weight := shareWeight(f.rate[l], bits)
+	last, had := f.weight[l]
+	f.weight[l] = weight
+	f.mu.Unlock()
+	j, err := work.BuildShares(t, f.Payout, weight, f.Params)
+	if err == nil && j.Shares && (!had || last != weight) {
+		f.Log.Printf("lane %s: shares of weight %d (%d units each)", l, weight, uint64(1)<<weight)
+	}
+	return j, err
 }
 
 // How hard a block is pushed at a node that does not answer: this many more times, and not for
@@ -143,6 +196,9 @@ const (
 // answer from the node settles the job either way. No answer at all (a timeout, a connection reset,
 // the node restarting) settles nothing: the block is sent again, and if it still does not get
 // through, the job stays open and the next nonce found for it is sent as well.
+//
+// With shares, every nonce goes to submitshare first, and on to submitblock when the node says it
+// is a block too. A share the node refuses (it went stale, say) costs nothing but itself.
 func (f *NodeFeed) Submit(j *work.Job, nonce uint64) (bool, bool, error) {
 	f.init()
 	f.mu.Lock()
@@ -151,6 +207,22 @@ func (f *NodeFeed) Submit(j *work.Job, nonce uint64) (bool, bool, error) {
 	if settled {
 		return took, false, nil
 	}
+	if j.Shares {
+		block, err := f.Src.SubmitShare(j.ShareAt(nonce))
+		switch {
+		case errors.Is(err, nodeclient.ErrRPC):
+			f.Log.Printf("lane %s: share refused: %v", j.Lane, err)
+			return false, false, nil
+		case err != nil:
+			return false, false, err
+		case !block:
+			return true, false, nil
+		}
+	}
+	return f.submitBlock(j, nonce)
+}
+
+func (f *NodeFeed) submitBlock(j *work.Job, nonce uint64) (bool, bool, error) {
 	b := j.Block(nonce)
 	id := b.Header.ID()
 

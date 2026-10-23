@@ -181,14 +181,14 @@ func TestLockedTransactionWaitsOutsideTheMempool(t *testing.T) {
 	if m.Len() != 0 {
 		t.Fatal("a locked transaction is in the mempool")
 	}
-	early := blockWith(49, []*Tx{coinbaseTx(49, MinerSubsidy(49), RegTest), tx})
+	early := blockWith(49, []*Tx{coinbaseTx(49, 0, RegTest), tx})
 	if err := early.ValidateBlock(u, RegTest); !errors.Is(err, ErrTxLocked) {
 		t.Fatalf("a block below the lock: %v, expected ErrTxLocked", err)
 	}
 	if _, err := m.Accept(tx, u, 50); err != nil {
 		t.Fatalf("the next block is 50, the lock 50: %v", err)
 	}
-	onTime := blockWith(50, []*Tx{coinbaseTx(50, MinerSubsidy(50)+100_000, RegTest), tx})
+	onTime := blockWith(50, []*Tx{coinbaseTx(50, 0, RegTest), tx})
 	if err := onTime.ValidateBlock(u, RegTest); err != nil {
 		t.Fatalf("a block at the lock height: %v", err)
 	}
@@ -252,9 +252,10 @@ func TestDevFeeIsPaidToAKeyFromTheFork(t *testing.T) {
 	p := noForks(RegTest)
 	p.Forks = []ForkAt{{Fork: ForkStrictOutputs, Height: fork}}
 	for _, h := range []uint64{fork - 1, fork} {
-		cb := BuildCoinbase(h, 0, minerKey, [32]byte{}, p)
+		cb := BuildCoinbase(h, nil, [32]byte{}, p)
 		b := &Block{Header: &Header{Height: uint32(h)}, Txs: []*Tx{cb}}
-		b.Header.MerkleRoot = TxMerkleRoot(b.Txs)
+		SealCoinbase(b.Txs, CreditsRoot(0, nil))
+		b.Seal()
 		if err := b.ValidateBlock(NewUTXOSet(), p); err != nil {
 			t.Fatalf("our own coinbase at height %d (fork at %d): %v", h, fork, err)
 		}
@@ -267,9 +268,10 @@ func TestDevFeeIsPaidToAKeyFromTheFork(t *testing.T) {
 		}
 	}
 	// The old placeholder at the fork height is refused.
-	stale := BuildCoinbase(fork, 0, minerKey, [32]byte{}, noForks(RegTest))
+	stale := BuildCoinbase(fork, nil, [32]byte{}, noForks(RegTest))
 	b := &Block{Header: &Header{Height: fork}, Txs: []*Tx{stale}}
-	b.Header.MerkleRoot = TxMerkleRoot(b.Txs)
+	SealCoinbase(b.Txs, CreditsRoot(0, nil))
+	b.Seal()
 	if err := b.ValidateBlock(NewUTXOSet(), p); err == nil {
 		t.Fatal("a coinbase paying the old placeholder validated at the fork height")
 	}

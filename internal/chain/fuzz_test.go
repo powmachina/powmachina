@@ -1,6 +1,7 @@
 package chain
 
 import (
+	"crypto/ed25519"
 	"math/big"
 	"testing"
 )
@@ -93,17 +94,22 @@ func FuzzNextBits(f *testing.F) {
 	})
 }
 
-// Finality attestations travel the network from anybody.
+// Finality attestations travel the network from anybody. Against a key somebody holds, a random
+// signature must never pass. (A key nobody holds — a point of small order — is one anybody can sign
+// with; a miner who puts one into a coinbase gives away its own seat and nothing else, FINALITY.md §7.)
 func FuzzAttestationVerify(f *testing.F) {
-	f.Add([]byte("signature"), uint64(100), uint8(0))
-	f.Add(make([]byte, 64), uint64(0), uint8(255))
+	f.Add([]byte("signature"), uint64(100), []byte{1})
+	f.Add(make([]byte, 64), uint64(0), make([]byte, 32))
 
-	q := newQuorumForFuzz()
-	f.Fuzz(func(t *testing.T, sig []byte, height uint64, idx uint8) {
+	f.Fuzz(func(t *testing.T, sig []byte, height uint64, seed []byte) {
 		var id [32]byte
-		a := Attestation{Height: height, BlockID: id, SignerIdx: idx, Signature: sig}
-		if err := a.Verify(q); err == nil {
-			t.Fatalf("a random signature passed verification (idx %d, height %d)", idx, height)
+		s := make([]byte, ed25519.SeedSize)
+		copy(s, seed)
+		priv := ed25519.NewKeyFromSeed(s)
+		a := Attestation{Height: height, BlockID: id, Signature: sig}
+		copy(a.Key[:], priv.Public().(ed25519.PublicKey))
+		if err := a.Verify(); err == nil {
+			t.Fatalf("a random signature passed verification (key %x, height %d)", a.Key[:4], height)
 		}
 		AttestationMessage(height, id)
 	})

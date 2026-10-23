@@ -21,13 +21,18 @@ const (
 	laneC = 0
 	laneG = 1
 
-	laneSpacing = 240.0 // chain.LaneBlockTime
-	relief      = 900   // chain.LaneRotationRelief
-	lwmaN       = 60    // chain.LwmaWindow
-	mtpSpan     = 11    // chain.MedianTimeSpan
-	baseRate    = 1e6   // hashes per second of a lane at rest; only ratios matter
-	hour        = 3600.0
-	day         = 86400.0
+	lwmaN    = 60  // chain.LwmaWindow
+	mtpSpan  = 11  // chain.MedianTimeSpan
+	baseRate = 1e6 // hashes per second of a lane at rest; only ratios matter
+	hour     = 3600.0
+	day      = 86400.0
+)
+
+// The lane's pace and the relief are the chain's unless a flag asks for others (`-spacing 240
+// -relief 900` model a 120 s block, the Sharepool spec §8).
+var (
+	laneSpacing       = 60.0 // chain.LaneBlockTime
+	relief      int64 = 300  // chain.LaneRotationRelief
 )
 
 // block is what the rules can see of a block (lane, t, target, relief) and what only the
@@ -189,7 +194,7 @@ func lwma(o lwmaOpts) func(s *sim, lane int) float64 {
 			b := &s.blocks[i]
 			w = append(w, entry{b.t, b.target, b.relief})
 		}
-		if gap := s.tip().t - w[len(w)-1].t; o.pendingGap && gap > 6*laneSpacing {
+		if gap := s.tip().t - w[len(w)-1].t; o.pendingGap && float64(gap) > 6*laneSpacing {
 			w = append(w[1:], entry{s.tip().t, w[len(w)-1].target, false})
 		}
 		var weighted, sum float64
@@ -204,7 +209,7 @@ func lwma(o lwmaOpts) func(s *sim, lane int) float64 {
 				high = w[i].t
 			}
 			if o.reliefCredit && w[i].relief {
-				st -= relief
+				st -= float64(relief)
 			}
 			st = math.Max(1, math.Min(st, 6*laneSpacing))
 			weighted += st * float64(i)
@@ -235,7 +240,7 @@ func asert(halflife float64, reliefCredit, absolute bool, cap float64) func(s *s
 		if absolute {
 			behind := float64(s.tip().t-s.blocks[0].t) - laneSpacing*float64(len(idx))
 			if reliefCredit {
-				behind -= relief * float64(s.nRelief[lane])
+				behind -= float64(relief) * float64(s.nRelief[lane])
 			}
 			return eqTarget(baseRate) * math.Pow(2, behind/halflife)
 		}
@@ -243,7 +248,7 @@ func asert(halflife float64, reliefCredit, absolute bool, cap float64) func(s *s
 		last := &s.blocks[i]
 		behind := float64(s.tip().t-s.blocks[i-1].t) - laneSpacing
 		if reliefCredit && last.relief {
-			behind -= relief
+			behind -= float64(relief)
 		}
 		e := behind / halflife
 		if cap > 0 {
@@ -505,13 +510,15 @@ func stddev(v []float64) float64 {
 func main() {
 	runs := flag.Int("runs", 200, "runs per candidate and scenario")
 	only := flag.String("scenario", "", "run one scenario (steady, drop, drop99, dead, revive, backdate, hop)")
+	flag.Float64Var(&laneSpacing, "spacing", laneSpacing, "seconds per block of one lane")
+	flag.Int64Var(&relief, "relief", relief, "seconds after which the rotation rule is waived")
 	flag.Parse()
 
 	for _, sc := range scenarios() {
 		if *only != "" && *only != sc.name {
 			continue
 		}
-		fmt.Printf("\n%s — %s (median of %d runs)\n", sc.name, sc.about, *runs)
+		fmt.Printf("\n%s — %s (median of %d runs, %g s lane, relief %d s)\n", sc.name, sc.about, *runs, laneSpacing, relief)
 		fmt.Printf("  %-22s", "")
 		for _, c := range sc.cols {
 			fmt.Printf(" %20s", c)

@@ -1,13 +1,16 @@
 package chain
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestSubsidySchedule(t *testing.T) {
 	if got := Subsidy(0); got != 0 {
 		t.Fatalf("the genesis has to have a zero reward, it has %d", got)
 	}
-	// The slow start: the first block 1 % of 40 POWM = 0.4 POWM, the last block of the ramp the full 40.
-	if got, want := Subsidy(1), 40*POWM/100; got != want {
+	// The slow start: the first block 1 % of 10 POWM = 0.1 POWM, the last block of the ramp the full 10.
+	if got, want := Subsidy(1), 10*POWM/100; got != want {
 		t.Fatalf("the first block: got %d, want %d", got, want)
 	}
 	if got := Subsidy(SlowStartBlocks - 1); got != InitialSubsidy {
@@ -54,7 +57,7 @@ func TestHalvingEmission(t *testing.T) {
 	if emitted > HalvingSupply {
 		t.Fatalf("the emission through halvings %d exceeds %d", emitted, HalvingSupply)
 	}
-	// five halvings above the permanent reward: 40, 20, 10, 5, 2.5 and 1.25 → ~82 M
+	// five halvings above the permanent reward: 10, 5, 2.5, 1.25, 0.625 and 0.3125 → ~82 M
 	if emitted < 80_000_000*POWM {
 		t.Fatalf("the emission through halvings is only %d POWM", emitted/POWM)
 	}
@@ -68,10 +71,10 @@ func TestTailSubsidy(t *testing.T) {
 		height uint64
 		want   int64
 	}{
-		{5*HalvingInterval - 1, InitialSubsidy >> 4}, // 2.5 POWM
-		{5 * HalvingInterval, InitialSubsidy >> 5},   // 1.25 POWM — still above the permanent one
+		{5*HalvingInterval - 1, InitialSubsidy >> 4}, // 0.625 POWM
+		{5 * HalvingInterval, InitialSubsidy >> 5},   // 0.3125 POWM — still above the permanent one
 		{6*HalvingInterval - 1, InitialSubsidy >> 5},
-		{6 * HalvingInterval, TailSubsidy},  // 0.625 would be below the permanent one → 0.999
+		{6 * HalvingInterval, TailSubsidy},  // 0.15625 would be below the permanent one → 0.24975
 		{20 * HalvingInterval, TailSubsidy}, // ~80 years
 		{63 * HalvingInterval, TailSubsidy}, // once upon a time zero
 		{1 << 62, TailSubsidy},
@@ -81,12 +84,13 @@ func TestTailSubsidy(t *testing.T) {
 			t.Errorf("height %d: reward %d, expected %d", c.height, got, c.want)
 		}
 	}
-	// The slow start does not change — the first block pays 0.40 POWM, not the permanent reward.
+	// The slow start does not change — the first block pays 0.10 POWM, not the permanent reward.
 	if got := Subsidy(1); got != InitialSubsidy/100 {
 		t.Errorf("the first block: %d, expected %d", got, InitialSubsidy/100)
 	}
-	if TailSubsidy != 99_900_000 {
-		t.Errorf("the permanent reward is %d — the agreed value is 0.999 POWM", TailSubsidy)
+	// 0.999 POWM every 2 minutes, whatever the block time.
+	if perTwoMinutes := TailSubsidy * int64(2*time.Minute/BlockTime); perTwoMinutes != 99_900_000 {
+		t.Errorf("the permanent reward is %d cogs every 2 minutes — the agreed value is 0.999 POWM", perTwoMinutes)
 	}
 }
 

@@ -15,12 +15,12 @@ import (
 	"io"
 	"math/big"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
 	"powmachina/internal/chain"
 	"powmachina/internal/mh"
-	"powmachina/internal/p2p"
 	"powmachina/internal/store"
 )
 
@@ -81,6 +81,7 @@ type Backend interface {
 	Header(id [32]byte) (*chain.Header, bool)
 	HeaderAt(height uint64) ([32]byte, bool)
 	Finality() (height uint64, id [32]byte, ok bool)
+	FinalityStatus() FinalityStatus
 	SubmitTx(tx *chain.Tx) error
 	Template(lane mh.Lane) (*Template, error)
 	AllowedLanes() []mh.Lane
@@ -88,9 +89,12 @@ type Backend interface {
 	StratumInfo() (any, error)
 	// SubmitBlock accepts a block from a miner.
 	SubmitBlock(blk *chain.Block) error
-	// SubmitAttestation accepts a finality attestation from a quorum signer and relays it to the
-	// network. The node verifies the signature itself — RPC is not more trustworthy than a peer.
-	SubmitAttestation(att chain.Attestation) error
+	// SubmitShare takes a Sharepool share from a miner: it is verified, pooled and relayed. It
+	// answers whether the share also meets its block's target — the miner then submits the block.
+	SubmitShare(s *chain.Share) (block bool, err error)
+	// SharePool sums the node's share pool by payout program; `full` is false on a node that
+	// holds no full DAG and so takes no shares.
+	SharePool() (full bool, tally map[[32]byte]chain.ShareTally)
 	// Generate mines blocks to an address — regtest only (testing wallets and exchanges).
 	Generate(count int, address string) ([][32]byte, error)
 }
@@ -112,6 +116,49 @@ type Template struct {
 	// miner assembles the block from them itself — it builds the coinbase with its own address.
 	Txs       []string `json:"txs"`
 	SizeLimit int      `json:"size_limit"`
+	// FinalityKey is the node's finality key (hex). The miner puts it into the coinbase, and the
+	// block becomes the node's seat in the finality quorum (the finality spec). Empty = none.
+	FinalityKey string `json:"finality_key,omitempty"`
+	// Settlement is the settlement body the block carries (hex, chain.Settlement): the shares from
+	// the node's pool it pays. The miner commits to it through the body root; empty = none.
+	Settlement string `json:"settlement,omitempty"`
+	// Shares is how many shares the settlement pays, for the operator to see.
+	Shares int `json:"shares"`
+	// Payouts are the credits the coinbase pays after the dev fee, in this order; the coinbase
+	// pays nothing else (the Sharepool spec §5.2).
+	Payouts []Payout `json:"payouts,omitempty"`
+	// CreditRoot is the root of the credit state the block builds on (hex); the coinbase commits
+	// to it after the witness root.
+	CreditRoot string `json:"credit_root"`
+	// TakesShares says whether the node takes the miner's shares (submitshare): a node holding
+	// the full DAG does, a light one does not, and the miner then looks for blocks only.
+	TakesShares bool `json:"takes_shares"`
+}
+
+// Payout is one coinbase payout: the value and the payout program (hex).
+type Payout struct {
+	Value  int64  `json:"value"`
+	Script string `json:"script"`
+}
+
+// FinalityStatus is the finality quorum as the node sees it.
+type FinalityStatus struct {
+	Enabled bool
+	Window  uint64
+	// Key is the node's own finality key, nil when it has none.
+	Key *[32]byte
+	// Pending is the block at the finality depth below the tip: what the quorum is signing now.
+	PendingHeight uint64
+	PendingBlock  [32]byte
+	// Members, Total, Signed and Own describe the quorum of the pending block: the keys with a
+	// seat, the weight of the window, the weight that has signed and the weight of this node's key.
+	// Members == 0 = there is no quorum yet (the window is not full).
+	Members int
+	Total   uint64
+	Signed  uint64
+	Own     uint64
+	// Caught is the number of keys proven to have signed two blocks at one height.
+	Caught int
 }
 
 type request struct {
@@ -253,6 +300,8 @@ func (s *Server) dispatch(req request) (any, error) {
 		return s.getBestBlockHash()
 	case "getblockhash":
 		return s.getBlockHash(req.Params)
+	case "getsharepool":
+		return s.getSharePool()
 	case "getblocks":
 		return s.getBlocks(req.Params)
 	case "gettxout":
@@ -281,8 +330,8 @@ func (s *Server) dispatch(req request) (any, error) {
 		return s.generate(req.Params)
 	case "submitblock":
 		return s.submitBlock(req.Params)
-	case "submitattestation":
-		return s.submitAttestation(req.Params)
+	case "submitshare":
+		return s.submitShare(req.Params)
 	case "getstratuminfo":
 		return s.backend.StratumInfo()
 	default:
@@ -332,7 +381,8 @@ func (s *Server) getInfo() (any, error) {
 	}, nil
 }
 
-// getFinality is what an exchange looks at before crediting a deposit.
+// getFinality is what an exchange looks at before crediting a deposit. `finalized`, `height` and
+// `block` are what it needs; `quorum` shows how the block on its way is doing.
 func (s *Server) getFinality() (any, error) {
 	height, id, ok := s.backend.Finality()
 	out := map[string]any{"finalized": ok}
@@ -340,7 +390,36 @@ func (s *Server) getFinality() (any, error) {
 		out["height"] = height
 		out["block"] = hex.EncodeToString(id[:])
 	}
+	st := s.backend.FinalityStatus()
+	if !st.Enabled {
+		out["enabled"] = false
+		return out, nil
+	}
+	out["enabled"] = true
+	out["depth"] = chain.FinalityDepth
+	out["window"] = st.Window
+	out["threshold"] = fmt.Sprintf("more than %d/%d", chain.FinalityNum, chain.FinalityDen)
+	if st.Key != nil {
+		out["key"] = hex.EncodeToString(st.Key[:])
+	}
+	if st.Caught > 0 {
+		out["caught_keys"] = st.Caught
+	}
+	q := map[string]any{"height": st.PendingHeight, "members": st.Members}
+	if st.Members > 0 {
+		q["block"] = hex.EncodeToString(st.PendingBlock[:])
+		q["signed_permille"] = permille(st.Signed, st.Total)
+		q["own_permille"] = permille(st.Own, st.Total)
+	}
+	out["quorum"] = q
 	return out, nil
+}
+
+func permille(part, total uint64) uint64 {
+	if total == 0 {
+		return 0
+	}
+	return part * 1000 / total
 }
 
 func (s *Server) getBlock(params json.RawMessage) (any, error) {
@@ -395,6 +474,21 @@ func (s *Server) getBlock(params json.RawMessage) (any, error) {
 	// The genesis has no predecessor; the explorer would offer a zero ID as a link into nothing.
 	if b.Header.Height > 0 {
 		out["prev_block"] = hex.EncodeToString(b.Header.PrevBlock[:])
+	}
+	// The share commitment: who closed the block, under its PoW (the Sharepool spec §2.1).
+	if b.Share.Payout != ([32]byte{}) {
+		if a, err := s.backend.AddressOf(chain.ScriptVersionBasic, b.Share.Payout[:]); err == nil {
+			out["payout"] = a
+		}
+	}
+	if key, ok := b.FinalityKey(); ok {
+		out["finality_key"] = hex.EncodeToString(key[:])
+	}
+	out["payout_threshold"] = b.Share.Threshold
+	out["share_weight"] = b.Share.Weight
+	// Who the block pays: the shares of its settlement body by miner (the Sharepool spec §3.1).
+	if tally := b.Settlement.Tally(); len(tally) > 0 {
+		out["settlement"] = s.tallyOut(tally)
 	}
 	// The block's work — what it contributed to the chainwork. Not "difficulty" as a multiple of
 	// some historical value; with two lanes with their own retarget that says nothing.
@@ -473,6 +567,30 @@ func (s *Server) submitBlock(params json.RawMessage) (any, error) {
 	}
 	id := blk.Header.ID()
 	return map[string]any{"id": hex.EncodeToString(id[:]), "height": blk.Header.Height}, nil
+}
+
+// submitShare takes a share in its full form (chain.ShareBytes, hex).
+func (s *Server) submitShare(params json.RawMessage) (any, error) {
+	var p struct {
+		Hex string `json:"hex"`
+	}
+	if err := decodeParams(params, &p); err != nil {
+		return nil, err
+	}
+	raw, err := hex.DecodeString(p.Hex)
+	if err != nil {
+		return nil, errors.New("the share has to be in hex")
+	}
+	sh, err := chain.DeserializeShare(raw)
+	if err != nil {
+		return nil, err
+	}
+	block, err := s.backend.SubmitShare(sh)
+	if err != nil {
+		return nil, err
+	}
+	id := sh.ID()
+	return map[string]any{"id": hex.EncodeToString(id[:]), "units": sh.Commit.Units(), "block": block}, nil
 }
 
 // MaxGenerate is the cap on blocks per generatetoaddress.
@@ -815,40 +933,6 @@ func (s *Server) getRichList(params json.RawMessage) (any, error) {
 // deliberately carries no transactions, only their count: whoever wants them goes to the block
 // detail.
 
-// submitAttestation accepts a finality attestation (105 B in hex) from the standalone quorum
-// signer (`powmachina-finality-signer`).
-//
-// A quorum key does not belong on a machine running a node (the finality spec §5), so the signer
-// is a process of its own and sends the attestation here. The node verifies it just as it would
-// one arriving from a peer — by the signature against the network's quorum, not by trusting
-// whoever called RPC.
-func (s *Server) submitAttestation(params json.RawMessage) (any, error) {
-	var p struct {
-		Hex string `json:"hex"`
-	}
-	if err := decodeParams(params, &p); err != nil {
-		return nil, err
-	}
-	raw, err := hex.DecodeString(p.Hex)
-	if err != nil {
-		return nil, fmt.Errorf("the attestation is not hex: %w", err)
-	}
-	att, err := p2p.DecodeAttestation(raw)
-	if err != nil {
-		return nil, fmt.Errorf("the attestation has the wrong shape (expected %d B): %w", p2p.AttestationBytes, err)
-	}
-	if err := s.backend.SubmitAttestation(att); err != nil {
-		return nil, err
-	}
-	height, id, ok := s.backend.Finality()
-	out := map[string]any{"accepted": true, "finalized": ok}
-	if ok {
-		out["finalized_height"] = height
-		out["finalized_block"] = hex.EncodeToString(id[:])
-	}
-	return out, nil
-}
-
 func (s *Server) getBlocks(params json.RawMessage) (any, error) {
 	var p struct {
 		From  *uint64 `json:"from"`
@@ -908,7 +992,7 @@ func (s *Server) getBlocks(params json.RawMessage) (any, error) {
 				outValue += o.Value
 			}
 		}
-		out = append(out, map[string]any{
+		row := map[string]any{
 			"id":             hex.EncodeToString(id[:]),
 			"height":         b.Header.Height,
 			"lane":           b.Header.Lane.String(),
@@ -918,9 +1002,59 @@ func (s *Server) getBlocks(params json.RawMessage) (any, error) {
 			"size":           len(b.Serialize()),
 			"value_out_cogs": outValue,
 			"body":           true,
-		})
+			"shares":         len(b.Settlement.Shares),
+		}
+		if b.Share.Payout != ([32]byte{}) {
+			if a, err := s.backend.AddressOf(chain.ScriptVersionBasic, b.Share.Payout[:]); err == nil {
+				row["payout"] = a
+			}
+		}
+		out = append(out, row)
 	}
 	return map[string]any{"height": tipHeight, "blocks": out}, nil
+}
+
+// MaxTallyMiners caps the miners a share summary lists; the totals still count every one.
+const MaxTallyMiners = 500
+
+// tallyOut is a share summary as the RPC answers it: the totals, and the miners by units, the most
+// first, a tie by address.
+func (s *Server) tallyOut(tally map[[32]byte]chain.ShareTally) map[string]any {
+	type row struct {
+		addr string
+		t    chain.ShareTally
+	}
+	rows := make([]row, 0, len(tally))
+	var shares int
+	var units uint64
+	for p, t := range tally {
+		shares += t.Shares
+		units += t.Units
+		a, err := s.backend.AddressOf(chain.ScriptVersionBasic, p[:])
+		if err != nil {
+			a = hex.EncodeToString(p[:])
+		}
+		rows = append(rows, row{a, t})
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].t.Units != rows[j].t.Units {
+			return rows[i].t.Units > rows[j].t.Units
+		}
+		return rows[i].addr < rows[j].addr
+	})
+	miners := make([]map[string]any, 0, min(len(rows), MaxTallyMiners))
+	for _, r := range rows[:min(len(rows), MaxTallyMiners)] {
+		miners = append(miners, map[string]any{"address": r.addr, "shares": r.t.Shares, "units": r.t.Units})
+	}
+	return map[string]any{"shares": shares, "units": units, "miner_count": len(rows), "miners": miners}
+}
+
+// getSharePool sums the node's share pool by miner: what the next blocks may settle.
+func (s *Server) getSharePool() (any, error) {
+	full, tally := s.backend.SharePool()
+	out := s.tallyOut(tally)
+	out["takes_shares"] = full
+	return out, nil
 }
 
 // getLaneStats returns the state of the individual lanes.
@@ -995,7 +1129,7 @@ func (s *Server) getLaneStats() (any, error) {
 			e["work_per_block"] = l.WorkPerBlock.String()
 		}
 		if l.AvgSpacingSec > 0 {
-			// Whole seconds — a fraction of a second at a 240 s spacing interests nobody and a
+			// Whole seconds — a fraction of a second at a 60 s spacing interests nobody and a
 			// decimal is needless room for misunderstanding.
 			e["avg_spacing_s"] = int64(l.AvgSpacingSec + 0.5)
 		}
@@ -1041,7 +1175,7 @@ var positionalNames = map[string][]string{
 	"gethashrate":        {"blocks", "window", "points"},
 	"generatetoaddress":  {"nblocks", "address"},
 	"submitblock":        {"hex"},
-	"submitattestation":  {"hex"},
+	"submitshare":        {"hex"},
 }
 
 // normalizeParams rewrites a positional array into a named object. An object and missing

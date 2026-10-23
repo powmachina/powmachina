@@ -12,9 +12,17 @@
   <dt>nonce</dt><dd>{{$b.Nonce}}</dd>
   <dt>merkle root</dt><dd>{{$b.MerkleRoot}}</dd>
   <dt>version</dt><dd>{{$b.Version}}</dd>
+  {{if $b.Payout}}<dt>closed by</dt><dd>{{template "miner" $b.Payout}} <span class="dim">— its own share of weight {{$b.ShareWeight}}</span></dd>{{end}}
   {{if $b.PrevBlock}}<dt>previous</dt><dd><a href="{{url "/block/"}}{{$b.PrevBlock}}">{{$b.PrevBlock}}</a></dd>{{end}}
   {{if $b.NextBlock}}<dt>next</dt><dd><a href="{{url "/block/"}}{{$b.NextBlock}}">{{$b.NextBlock}}</a></dd>{{end}}
 </dl>
+
+{{with $b.Settlement}}
+<h2>Shares paid</h2>
+<p class="meta"><span>{{.Shares}} shares, {{.Units}} units, {{.MinerCount}} miners — every share earns the same price per unit, the block's own share too.</span></p>
+{{template "mosaic" .}}
+{{template "minertable" .}}
+{{end}}
 
 <h2>Transactions</h2>
 {{if .Data.Txs}}

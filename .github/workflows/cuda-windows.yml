@@ -25,14 +25,14 @@ permissions:
 
 env:
   # The same toolkit the DLL was verified with on a card. Changing it changes what comes out.
-  CUDA_VERSION: "13.4.1"
-  CUDA_SHA256: 632a5912995473cea77b24788715b8d94db17a94cfea102a12f72c3614fe8c7e
+  CUDA_VERSION: "13.4.3"
+  CUDA_SHA256: 35296d52a972c931a70cf8084120e3a0f0479de13f12527fcebfe8fbcaf5399c
 
 jobs:
   build:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The whole toolkit, silently. Compiling needs no card.
       - name: CUDA toolkit
@@ -76,7 +76,7 @@ jobs:
             grep -qw "$s" bin/exports.txt || { echo "$s is not exported"; exit 1; }
           done
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: powm-cuda-windows-x64
           path: machinahash-cuda/bin/powm-cuda.dll

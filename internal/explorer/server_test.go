@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"powmachina/internal/address"
 )
 
 // fakeNode is a node with fixed answers. The templates and the routes are tested, not the chain.
@@ -612,5 +614,73 @@ func TestHomeRibbon(t *testing.T) {
 	}
 	if strings.Contains(ribbon, ">C<") || strings.Contains(ribbon, ">G<") {
 		t.Fatal("the ribbon has the bare lane letter instead of the algorithm name")
+	}
+}
+
+// The share pool page draws every miner's icon and the mosaic; a block shows who closed it and
+// who its shares paid; the block lists show the closer's icon. The icon of an address is the same
+// wherever it is drawn.
+func TestSharesAndMinerIcons(t *testing.T) {
+	a, _ := address.Encode("rpowm", 0, make([]byte, 32))
+	prog := make([]byte, 32)
+	prog[0] = 1
+	b, _ := address.Encode("rpowm", 0, prog)
+	tally := map[string]any{"shares": 5, "units": 3000, "miner_count": 3, "miners": []any{
+		map[string]any{"address": a, "shares": 3, "units": 2000},
+		map[string]any{"address": b, "shares": 1, "units": 500},
+	}}
+	pool := map[string]any{"takes_shares": true}
+	for k, v := range tally {
+		pool[k] = v
+	}
+	block := map[string]any{
+		"id": strings.Repeat("b", 64), "height": 24, "lane": "C", "time": time.Now().Unix(),
+		"bits": "2000ffff", "txs": []string{}, "payout": a, "share_weight": 11, "settlement": tally,
+	}
+	blocks := map[string]any{"height": 25, "blocks": []any{
+		map[string]any{"id": strings.Repeat("a", 64), "height": 25, "lane": "G", "time": time.Now().Unix(),
+			"bits": "2000ffff", "tx_count": 1, "size": 218, "payout": b, "shares": 4},
+	}}
+	node := fakeNode(t, map[string]any{"getsharepool": pool, "getblock": block, "getblocks": blocks})
+	defer node.Close()
+	h := newTestServer(t, node)
+
+	iconA, iconB := iconOf(a).SVG(16), iconOf(b).SVG(16)
+	if iconA == iconB {
+		t.Fatal("two addresses drew the same icon")
+	}
+	shares := get(t, h, "/explorer/shares").Body.String()
+	for _, want := range []string{`aria-current="page">Shares</a>`, `class="mosaic"`, iconOf(a).Color(),
+		iconOf(b).Color(), "hsl(0, 0%, 60%)", "and 3 miners in all", "66.6%"} {
+		if !strings.Contains(shares, want) {
+			t.Errorf("the shares page is missing %q", want)
+		}
+	}
+	page := get(t, h, "/explorer/block/24").Body.String()
+	for _, want := range []string{"closed by", iconA, "weight 11", "Shares paid", `class="mosaic"`} {
+		if !strings.Contains(page, want) {
+			t.Errorf("the block page is missing %q", want)
+		}
+	}
+	for _, path := range []string{"/explorer/blocks", "/explorer/"} {
+		if body := get(t, h, path).Body.String(); !strings.Contains(body, iconB) {
+			t.Errorf("%s: the closer's icon is missing", path)
+		}
+	}
+	if body := get(t, h, "/explorer/address/rpowm1qtest").Body.String(); !strings.Contains(body, iconOf("rpowm1qtest").SVG(40)) {
+		t.Error("the address page has no icon")
+	}
+	// No inline style anywhere: the CSP would block it.
+	for _, path := range []string{"/explorer/shares", "/explorer/block/24", "/explorer/blocks"} {
+		if body := get(t, h, path).Body.String(); strings.Contains(body, ` style="`) {
+			t.Errorf("%s: an inline style attribute", path)
+		}
+	}
+
+	// A light node keeps no shares, and the page says so instead of showing an empty pool.
+	light := fakeNode(t, map[string]any{"getsharepool": map[string]any{"takes_shares": false}})
+	defer light.Close()
+	if body := get(t, newTestServer(t, light), "/explorer/shares").Body.String(); !strings.Contains(body, "without the full DAG") {
+		t.Error("a light node's empty pool is not explained")
 	}
 }

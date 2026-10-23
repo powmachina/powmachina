@@ -4,7 +4,7 @@
 <table>
   <thead><tr>
     <th>Height</th><th>Algorithm</th><th>Time</th><th class="num">Txs</th>
-    <th class="num">Output</th><th class="num">Size</th><th>Hash</th>
+    <th class="num">Output</th><th class="num">Size</th><th>Closed by</th><th>Hash</th>
   </tr></thead>
   <tbody>
   {{range $d.Blocks}}
@@ -19,10 +19,11 @@
       <td class="num">{{cogsShort .ValueOutCogs}}</td>
       <td class="num dim">{{bytes .Size}}</td>
       {{end}}
+      <td>{{if .Payout}}{{template "miner" .Payout}}{{end}}</td>
       <td class="mono dim"><a href="{{url "/block/"}}{{.ID}}">{{short .ID}}</a></td>
     </tr>
   {{else}}
-    <tr><td colspan="7" class="dim">No blocks yet.</td></tr>
+    <tr><td colspan="8" class="dim">No blocks yet.</td></tr>
   {{end}}
   </tbody>
 </table>

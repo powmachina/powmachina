@@ -26,8 +26,9 @@ const (
 	// StorageMassC is a consensus constant. 10⁸: an output of 1 POWM has mass 1, an output of 1 cog 10⁸.
 	// Tightening it (raising it) is possible with a soft fork, relaxing it only with a hard fork — which is why it is not stricter.
 	StorageMassC uint64 = 100_000_000
-	// MaxBlockStorageMass is the cap on the sum of masses in a block, including the coinbase.
-	MaxBlockStorageMass uint64 = 256_000
+	// MaxBlockStorageMass is the cap on the sum of masses in a block, including the coinbase:
+	// 256 000 per 120 s before the 30 s block, the same per day.
+	MaxBlockStorageMass uint64 = 64_000
 	// CoinbaseStorageMassReserve is the room a block template leaves for the coinbase.
 	CoinbaseStorageMassReserve uint64 = 16_000
 )

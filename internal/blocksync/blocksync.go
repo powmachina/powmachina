@@ -24,7 +24,8 @@
 // # What is verified for every block
 //
 //  1. `Header.ID()` has to equal the id from the manifest (otherwise it is not that block),
-//  2. `TxMerkleRoot(Txs)` has to equal `Header.MerkleRoot`.
+//  2. the header's merkle root has to commit to the block's share commitment and transactions
+//     (`Block.CheckRoot`).
 //
 // Point 2 is easy to forget and it is fatal: without it a source could send a correct header with
 // completely different transactions.
@@ -76,9 +77,8 @@ func VerifyBody(b *chain.Block, want [32]byte) error {
 	if got := b.Header.ID(); got != want {
 		return fmt.Errorf("%w: id %x, expected %x", ErrBadBlock, got[:6], want[:6])
 	}
-	if got := chain.TxMerkleRoot(b.Txs); got != b.Header.MerkleRoot {
-		return fmt.Errorf("%w: the merkle root is %x, the header says %x",
-			ErrBadBlock, got[:6], b.Header.MerkleRoot[:6])
+	if err := b.CheckRoot(); err != nil {
+		return fmt.Errorf("%w: %w", ErrBadBlock, err)
 	}
 	return nil
 }

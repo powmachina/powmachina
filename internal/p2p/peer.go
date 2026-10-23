@@ -183,6 +183,7 @@ type Peer struct {
 	banScore      int
 	lastAddrMsg   time.Time
 	addrTokens    float64
+	sentAddrs     bool // whether it was already answered a getaddr
 	// knownHeight is how far the peer's chain reaches as far as we can tell. The handshake
 	// seeds it from version.StartHeight and every headers message afterwards raises it. Reading
 	// StartHeight alone is not enough: it is the height at the moment of connecting and it is
@@ -257,6 +258,16 @@ const (
 	addrBurst      = 1000 // how many addresses a peer may send at once
 	addrRefillRate = 0.1  // and how many it gains per second (≈ 360/h)
 )
+
+// FirstGetAddr says whether this is the peer's first getaddr. Only the first is answered: asking
+// again and again would copy out the whole table a sample at a time.
+func (p *Peer) FirstGetAddr() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	first := !p.sentAddrs
+	p.sentAddrs = true
+	return first
+}
 
 // AllowAddrs permits processing n addresses from this peer; it returns how many should be accepted.
 func (p *Peer) AllowAddrs(n int, now time.Time) int {

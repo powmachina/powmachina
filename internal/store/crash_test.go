@@ -40,7 +40,8 @@ func testChain(n int) []*chain.Block {
 		extra[1] = byte(h >> 8)
 		key := make([]byte, 32)
 		key[0] = byte(h % 7)
-		cb := chain.BuildCoinbase(uint64(h), 0, key, extra, params)
+		cb := chain.BuildCoinbase(uint64(h), nil, extra, params)
+		cb.Outputs = append(cb.Outputs, chain.TxOut{Value: 1, Script: key})
 		b := &chain.Block{
 			Header: &chain.Header{
 				Version: 1, PrevBlock: prev, Bits: chain.RegtestTargetBits,
@@ -48,7 +49,7 @@ func testChain(n int) []*chain.Block {
 			},
 			Txs: []*chain.Tx{cb},
 		}
-		b.Header.MerkleRoot = chain.TxMerkleRoot(b.Txs)
+		b.Seal()
 		prev = b.Header.ID()
 		blocks = append(blocks, b)
 	}

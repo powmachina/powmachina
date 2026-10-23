@@ -21,18 +21,23 @@ func mineFullBlock(t *testing.T, hc *chain.HeaderChain, u *chain.UTXOSet, lane m
 	}
 	var extra [32]byte
 	extra[0] = byte(height + 1)
-	cb := chain.BuildCoinbase(height+1, 0, minerScript, extra, params)
+	payouts, err := chain.CreditPayouts(height+1, u)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cb := chain.BuildCoinbase(height+1, payouts, extra, params)
 
 	blk := &chain.Block{
 		Header: &chain.Header{Version: 1, PrevBlock: tipID, Bits: bits,
 			Height: uint32(height + 1), Lane: lane, Time: tip.Time + 130},
 		Txs: []*chain.Tx{cb},
 	}
+	copy(blk.Share.Payout[:], minerScript)
 	if low := hc.MinTime(); blk.Header.Time < low {
 		blk.Header.Time = low
 	}
-	chain.SealCoinbase(blk.Txs, height+1, params)
-	blk.Header.MerkleRoot = chain.TxMerkleRoot(blk.Txs)
+	chain.SealCoinbase(blk.Txs, u.CreditsRoot())
+	blk.Seal()
 
 	for nonce := uint64(0); nonce < 200_000; nonce++ {
 		blk.Header.Nonce = nonce

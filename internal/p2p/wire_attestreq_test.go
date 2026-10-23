@@ -1,6 +1,7 @@
 package p2p
 
 import (
+	"crypto/ed25519"
 	"testing"
 
 	"powmachina/internal/chain"
@@ -37,7 +38,9 @@ func TestGetAttestRoundTripAndLimits(t *testing.T) {
 func TestAttestationsRoundTrip(t *testing.T) {
 	var list []chain.Attestation
 	for i := 0; i < 5; i++ {
-		list = append(list, chain.Sign(chain.RegtestSignerKey(i), uint8(i), uint64(100+i), [32]byte{byte(i)}))
+		seed := make([]byte, ed25519.SeedSize)
+		seed[0] = byte(i)
+		list = append(list, chain.Sign(ed25519.NewKeyFromSeed(seed), uint64(100+i), [32]byte{byte(i)}))
 	}
 	raw, err := EncodeAttestations(list)
 	if err != nil {
@@ -48,7 +51,7 @@ func TestAttestationsRoundTrip(t *testing.T) {
 		t.Fatalf("round-trip: %d attestations, %v", len(back), err)
 	}
 	for i := range list {
-		if back[i].Height != list[i].Height || back[i].SignerIdx != list[i].SignerIdx ||
+		if back[i].Height != list[i].Height || back[i].Key != list[i].Key ||
 			back[i].BlockID != list[i].BlockID || string(back[i].Signature) != string(list[i].Signature) {
 			t.Fatalf("attestation %d does not match", i)
 		}

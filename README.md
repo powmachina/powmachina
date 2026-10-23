@@ -14,7 +14,7 @@ the same block weight. An ASIC would have to cover two opposing hardware domains
 one earns it half the emission at most.
 
 [![licence](https://img.shields.io/badge/licence-BSD--3--Clause-0a0a0a?style=flat-square&labelColor=2c2c2c)](LICENSE)
-[![go](https://img.shields.io/badge/go-1.26-0a0a0a?style=flat-square&labelColor=2c2c2c)](go.mod)
+[![go](https://img.shields.io/badge/go-1.27-0a0a0a?style=flat-square&labelColor=2c2c2c)](go.mod)
 [![lanes](https://img.shields.io/badge/lanes-CPU%20%2B%20GPU-0a0a0a?style=flat-square&labelColor=2c2c2c)](#the-two-lanes)
 [![premine](https://img.shields.io/badge/premine-none-0a0a0a?style=flat-square&labelColor=2c2c2c)](#the-numbers)
 [![docs](https://img.shields.io/badge/docs-powmachina.com-0a0a0a?style=flat-square&labelColor=2c2c2c)](https://powmachina.com)
@@ -39,11 +39,11 @@ crowd the other out. A miner runs both at once if it has the hardware for both.
 |---|---|
 | Ticker | **POWM** |
 | Addresses | `powm1q…` — bech32m (testnet `tpowm1q…`, regtest `rpowm1q…`) |
-| Block time | 120 s, so 240 s per lane · block at most 256 kB |
-| Finality | 5 of 9 signatures at a depth of 20 blocks (~40 min) |
+| Block time | 30 s, so 60 s per lane · block at most 96 kB + the shares it settles |
+| Finality | the miners of the last day (2,880 blocks), more than 2/3 of their weight, at a depth of 80 blocks (~40 min) |
 | Max supply | 84,000,000 POWM · halving every 4 years |
-| Premine | **none** — block one pays 0.40 POWM instead of 40 |
-| Dev fee | 5 % of the subsidy to height 525,000 (~2 years), then nothing |
+| Premine | **none** — block one pays 0.10 POWM instead of 10 |
+| Dev fee | 5 % of the subsidy to height 2,100,000 (~2 years), then nothing |
 
 > **The specification, the algorithm, finality and the operating guides are published at
 > [powmachina.com](https://powmachina.com).** This repository is the source.
@@ -134,14 +134,14 @@ cmd/powmachinad/                  the node
 cmd/powmachina-miner/             the miner, both lanes
 cmd/powmachina-wallet-cli/        the wallet, terminal
 cmd/powmachina-wallet-rpc/        the wallet as a service (exchanges, the desktop app)
-cmd/powmachina-finality-signer/   a quorum signer, runs away from any node
 cmd/powmachina-explorer/          the block explorer
 cmd/libmachinahash/               a C ABI, so pool software never rebuilds consensus bytes itself
 cmd/mh-*/                         calibration and test-vector tools
+cmd/powm-*sim/                    simulators the consensus numbers were picked with
 
 internal/mh/                      MachinaHash — the only implementation
 internal/randomx/csrc/            the vendored RandomX upstream
-internal/chain/                   consensus: the header, emission, difficulty, the lane rules
+internal/chain/                   consensus: the header, emission, difficulty, the lane rules, the Sharepool
 internal/store/                   storage (Pebble) — it survives kill -9
 internal/blocksync/               bodies pulled in parallel from several sources
 
@@ -152,8 +152,7 @@ vectors/                          the test vectors — the algorithm's contract
 
 ## Status
 
-The chain runs on a testnet. Before mainnet: the genesis, the finality quorum keys in independent
-hands, and the seed domains.
+The chain runs on a testnet. Before mainnet: the genesis and the seed domains.
 
 ## Contributing
 

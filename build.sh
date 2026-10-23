@@ -19,7 +19,7 @@ need() {
         exit 1
     }
 }
-need go "install Go 1.26+: https://go.dev/dl  (or use 'docker build .')"
+need go "install Go 1.27+: https://go.dev/dl  (or use 'docker build .')"
 need cc "a C compiler is missing — RandomX is C++ (apt install build-essential)"
 
 echo "[1/2] node…"

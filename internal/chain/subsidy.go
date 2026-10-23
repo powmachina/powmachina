@@ -18,7 +18,7 @@ func Subsidy(height uint64) int64 {
 	}
 
 	if height < SlowStartBlocks {
-		// A linear ramp from 1 % to 100 % over the first 5 000 blocks (anti-instamine).
+		// A linear ramp from 1 % to 100 % over the first 20 000 blocks (anti-instamine).
 		num := height + 1
 		if min := SlowStartBlocks / 100; num < min {
 			num = min

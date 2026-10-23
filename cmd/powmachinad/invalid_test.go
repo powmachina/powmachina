@@ -17,7 +17,7 @@ import (
 // It is the same thing MineBlocks does, but without checking the contents — precisely so that
 // a block with **valid PoW and an invalid body** can be constructed. Anybody with hashrate can
 // produce such a block and the node has to survive it.
-func mineBlockWith(t *testing.T, src *Node, txs []*chain.Tx) *chain.Block {
+func mineBlockWith(t *testing.T, src *Node, txs []*chain.Tx, shares ...*chain.Share) *chain.Block {
 	t.Helper()
 	tip, height, tipID := src.chain.Tip()
 	lanes := src.chain.AllowedLanesNow(time.Now())
@@ -39,19 +39,32 @@ func mineBlockWith(t *testing.T, src *Node, txs []*chain.Tx) *chain.Block {
 	if _, err := rand.Read(extra[:]); err != nil {
 		t.Fatal(err)
 	}
-	cb := chain.BuildCoinbase(height+1, 0, src.minerKey, extra, src.params)
+	payouts, err := chain.CreditPayouts(height+1, src.store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cb := chain.BuildCoinbase(height+1, payouts, extra, src.params)
 	blk := &chain.Block{
 		Header: &chain.Header{Version: 1, PrevBlock: tipID, Bits: bits,
 			Height: uint32(height + 1), Lane: lane},
 		Txs: append([]*chain.Tx{cb}, txs...),
 	}
-	chain.SealCoinbase(blk.Txs, height+1, src.params)
+	copy(blk.Share.Payout[:], src.minerKey)
+	blk.Share.Weight = chain.MaxShareWeight
+	chain.SealCoinbase(blk.Txs, src.store.CreditsRoot())
+	if len(shares) > 0 {
+		s, err := chain.NewSettlement(shares, height+1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		blk.Settlement = *s
+	}
 	pow, err := src.pow(height + 1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	h := blk.Header
-	h.MerkleRoot = chain.TxMerkleRoot(blk.Txs)
+	blk.Seal()
 	h.Time = uint32(time.Now().Unix())
 	if low := src.chain.MinTime(); h.Time < low {
 		h.Time = low

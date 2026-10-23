@@ -114,6 +114,61 @@ func (m *Manager) SelectOutboundCandidate(kind PeerKind) (Address, error) {
 	return m.SelectOutbound(kind)
 }
 
+// SelectOutboundServices is SelectOutbound limited to addresses seen with every service in `want`
+// — a node holding the full DAG looks for others like it this way, because shares only travel
+// between those. The spread over network groups holds here too.
+func (m *Manager) SelectOutboundServices(kind PeerKind, want uint64) (Address, error) {
+	if !kind.Outbound() {
+		return Address{}, errors.New("p2p: SelectOutboundServices is for outbound connections only")
+	}
+	// A snapshot, so the filter runs under the addrman's lock without taking the manager's.
+	m.mu.Lock()
+	used := m.outboundGroupsLocked()
+	connected := make(map[string]bool, len(m.peers))
+	for k := range m.peers {
+		connected[k] = true
+	}
+	now := m.now()
+	m.mu.Unlock()
+	checkGroup := m.cfg.RequireDistinctGroups && kind != PeerFeeler
+	return m.addrs.SelectServices(want, func(a Address) bool {
+		return connected[a.key()] || m.bans.Banned(HostKey(a), now) ||
+			(checkGroup && used[string(a.group(m.addrs.asn))])
+	})
+}
+
+// CountServices is the number of connections of a kind whose peer gave every service in `want` in
+// its handshake.
+func (m *Manager) CountServices(kind PeerKind, want uint64) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for _, p := range m.peers {
+		if p.Kind == kind && p.Version != nil && p.Version.Services&want == want {
+			n++
+		}
+	}
+	return n
+}
+
+// NewestWithout is the youngest connection of a kind whose peer lacks a service in `want` — the
+// one to give up for a peer that has them. The youngest, because the old ones have proved
+// themselves and an attacker's connections are the new ones.
+func (m *Manager) NewestWithout(kind PeerKind, want uint64) *Peer {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var newest *Peer
+	for _, p := range m.peers {
+		if p.Kind != kind || p.Version == nil || p.Version.Services&want == want {
+			continue
+		}
+		if newest == nil || p.Connected.After(newest.Connected) {
+			newest = p
+		}
+	}
+	return newest
+}
+
 func (m *Manager) outboundGroupsLocked() map[string]bool {
 	used := make(map[string]bool)
 	for _, p := range m.peers {

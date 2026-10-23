@@ -15,7 +15,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -40,7 +39,6 @@ func main() {
 	stratumAddr := flag.String("stratum", "", "stratum server for miners (e.g. 0.0.0.0:27699 on regtest; mainnet 7699)")
 	stratumPay := flag.String("stratum-address", "", "pay every stratum block here (a single-owner farm); otherwise to the address from the miner login")
 	mineAddr := flag.String("mineaddress", "", "address -mine pays to (without it a throwaway key, the reward is lost)")
-	signers := flag.String("finality-signer", "", "indices in the finality quorum, comma separated (regtest only; otherwise powmachina-finality-signer)")
 	noFinality := flag.Bool("no-finality", false, "do not trust the finality quorum — run the chain on plain PoW (the finality spec §5)")
 	nodeName := flag.String("nodename", "", "node label peers will see you under (max 24 characters)")
 	txIndex := flag.Bool("txindex", false, "keep a transaction index (txid → block); the explorer and an exchange need it")
@@ -81,18 +79,24 @@ func main() {
 	if *mine > 0 && dagMode != dagFull {
 		dagMode = dagFull // mining hashes millions of nonces — light would slow it a hundredfold
 	}
+	// Miners on the stratum port hand in shares, and only a node with the full DAG verifies them
+	// (the Sharepool spec §7); in auto mode it would go light at the tip and refuse them all.
+	if *stratumAddr != "" && dagMode != dagFull {
+		dagMode = dagFull
+		log.Printf("-stratum: the full DAG is on, the node verifies its miners' shares")
+	}
 	params, err := networkFlags(*testnet, *regtest)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "\n"+err.Error())
 		os.Exit(2)
 	}
 
-	// --no-finality: the quorum is cleared before the node is assembled, so finality is off
+	// --no-finality: the window is cleared before the node is assembled, so finality is off
 	// everywhere at once (the node and the header chain) and there is no way to diverge.
 	// Whoever does not trust the quorum runs plain PoW and is still on the same network
-	// (the finality spec §5).
+	// (the finality spec). Such a node neither counts the quorum nor holds a seat in it.
 	if *noFinality {
-		params.FinalitySigners = nil
+		params.FinalityWindow = 0
 		log.Printf("finality disabled by --no-finality: running plain PoW")
 	}
 	if *mine > 0 && params.Magic != chain.RegTest.Magic {
@@ -101,7 +105,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "\n-mine is for regtest only; elsewhere use powmachina-miner")
 		os.Exit(2)
 	}
-	runNode(params, *listenAddr, *connectAddr, *rpcAddr, *stratumAddr, *stratumPay, *mineAddr, *signers, *anchors, *addnode, *datadir, *blockSrc, *serveBlocks, *metrics, *nodeName, *banList, dagMode, *serveBudget, *mine, *txIndex, *addrIndex, *allowPrivate)
+	runNode(params, *listenAddr, *connectAddr, *rpcAddr, *stratumAddr, *stratumPay, *mineAddr, *anchors, *addnode, *datadir, *blockSrc, *serveBlocks, *metrics, *nodeName, *banList, dagMode, *serveBudget, *mine, *txIndex, *addrIndex, *allowPrivate)
 }
 
 // networkFlags picks the network. Mainnet cannot be picked until it has a genesis: better to
@@ -118,7 +122,7 @@ func networkFlags(testnet, regtest bool) (chain.NetParams, error) {
 	return chain.NetParams{}, errors.New("the mainnet genesis is not fixed yet — use -testnet or -regtest")
 }
 
-func runNode(params chain.NetParams, listenAddr, connectAddr, rpcAddr, stratumAddr, stratumPay, mineAddr, signers, anchorsPath, addnode, datadir,
+func runNode(params chain.NetParams, listenAddr, connectAddr, rpcAddr, stratumAddr, stratumPay, mineAddr, anchorsPath, addnode, datadir,
 	blockSrc, serveBlocks, metricsAddr, nodeName, banList string, dag dagMode, serveBudgetMiB int64, mine int,
 	txIndex, addrIndex, allowPrivate bool) {
 	genesis := chain.Genesis(params)
@@ -194,24 +198,11 @@ func runNode(params chain.NetParams, listenAddr, connectAddr, rpcAddr, stratumAd
 			"is still catching up on history, or somebody handed you a cheap branch — while " +
 			"this holds, `getinfo` reports trusted_work=false and the chain cannot be trusted.")
 	}
-	if set := params.SignerSet(); set != nil {
-		log.Printf("finality: quorum %d of %d, depth %d blocks", set.Threshold, len(set.Keys),
-			chain.FinalityDepth)
+	if key := node.FinalityKey(); key != nil {
+		log.Printf("finality: a quorum of the miners of the last %d blocks, depth %d blocks; this node's key %x",
+			params.FinalityWindow, chain.FinalityDepth, key[:])
 	} else {
-		log.Printf("finality: no quorum, the chain runs on plain PoW")
-	}
-
-	if signers != "" {
-		var idx []int
-		for _, part := range strings.Split(signers, ",") {
-			i, err := strconv.Atoi(strings.TrimSpace(part))
-			if err != nil || i < 0 || i >= chain.FinalitySigners {
-				log.Fatalf("invalid signer index %q", part)
-			}
-			idx = append(idx, i)
-		}
-		node.SignAs(idx...)
-		log.Printf("signing finality attestations as quorum members %v", idx)
+		log.Printf("finality: off, the chain runs on plain PoW")
 	}
 
 	if mineAddr != "" {

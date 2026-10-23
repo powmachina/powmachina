@@ -28,8 +28,8 @@ const (
 	// RandMathOps is the length of the RANDMATH sequence (it changes every epoch).
 	RandMathOps = 16
 
-	// EpochBlocks is the epoch = 5 000 blocks (≈ 6.9 days with a 120 s block).
-	EpochBlocks uint64 = 5000
+	// EpochBlocks is the epoch = 20 000 blocks (≈ 6.9 days with a 30 s block).
+	EpochBlocks uint64 = 20_000
 
 	// CacheBytesMainnet is the mainnet cache: 16 MiB.
 	CacheBytesMainnet = 16 << 20
@@ -38,7 +38,7 @@ const (
 	// DagGrowthPerEpoch is the DAG's growth per epoch: +4 MiB.
 	//
 	// The growth is meant to stop an ASIC with fixed memory, but it must not retire cards — Ethash
-	// retired 4 GB GPUs that way. With a 120 s block it is ≈ 210 MiB/year: 2.0 GiB after 5 years,
+	// retired 4 GB GPUs that way. With an epoch of 6.9 days it is ≈ 210 MiB/year: 2.0 GiB after 5 years,
 	// 3.1 GiB after 10.
 	DagGrowthPerEpoch = 4 << 20
 	// DagMaxBytes is the cap on the DAG's size: 8 GiB. With growth of

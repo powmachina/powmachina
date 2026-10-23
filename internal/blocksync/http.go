@@ -107,12 +107,12 @@ func (h *HTTPSource) one(ctx context.Context, id [32]byte) (*chain.Block, error)
 		return nil, fmt.Errorf("blocksync: %s returned %s", url, resp.Status)
 	}
 	// A size cap: without it a source could send an endless stream.
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, int64(chain.MaxBlockBytes)+1))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, int64(chain.MaxBlockWireBytes)+1))
 	if err != nil {
 		return nil, err
 	}
-	if len(raw) > chain.MaxBlockBytes {
-		return nil, fmt.Errorf("%w: %s sent more than MaxBlockBytes", ErrBadBlock, h.Base)
+	if len(raw) > chain.MaxBlockWireBytes {
+		return nil, fmt.Errorf("%w: %s sent more than MaxBlockWireBytes", ErrBadBlock, h.Base)
 	}
 	return chain.DeserializeBlock(raw)
 }

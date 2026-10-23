@@ -6,7 +6,11 @@ import (
 	"fmt"
 )
 
-// A block = the header + the transactions.
+// A block = the header + the share commitment + the settlement body + the transactions.
+//
+// The commitment (share.go) is what the header's merkle root is built from together with the
+// transactions: the miner's payout, its finality key, its payout threshold and the weight of the
+// share the block closes. A block is the share whose hash also met the block's target.
 
 const MaxBlockTxs = 20000
 
@@ -19,21 +23,28 @@ var (
 	ErrExtraCoinbase     = errors.New("chain: only the first transaction may be a coinbase")
 	ErrBadMerkle         = errors.New("chain: the merkle root does not match the header")
 	ErrDuplicateTx       = errors.New("chain: the block contains the same transaction twice")
-	ErrCoinbaseValue     = errors.New("chain: the coinbase takes more than it may")
+	ErrCoinbaseValue     = errors.New("chain: the coinbase does not pay what the credit state owes")
+	ErrCreditRoot        = errors.New("chain: the coinbase commits to another credit state")
 	ErrDevFeeMissing     = errors.New("chain: the dev fee output is missing or does not match")
 	ErrInputsBelowOutput = errors.New("chain: the outputs exceed the inputs")
 )
 
 type Block struct {
-	Header *Header
-	Txs    []*Tx
+	Header     *Header
+	Share      ShareCommit
+	Settlement Settlement
+	Txs        []*Tx
 }
 
 // Serialize writes the block the way it travels the network.
 func (b *Block) Serialize() []byte {
 	hdr := b.Header.Serialize()
-	out := make([]byte, 0, len(hdr)+2+len(b.Txs)*128)
+	commit := b.Share.Serialize()
+	settlement := b.Settlement.Serialize()
+	out := make([]byte, 0, len(hdr)+len(commit)+len(settlement)+4+len(b.Txs)*128)
 	out = append(out, hdr[:]...)
+	out = append(out, commit[:]...)
+	out = append(out, settlement...)
 	var n [4]byte
 	binary.LittleEndian.PutUint32(n[:], uint32(len(b.Txs)))
 	out = append(out, n[:]...)
@@ -43,25 +54,45 @@ func (b *Block) Serialize() []byte {
 	return out
 }
 
+// MaxBlockWireBytes is the most a block can take on the wire: the transactions' cap and the
+// settlement body's.
+const MaxBlockWireBytes = MaxBlockBytes + MaxSettlementBytes
+
 // DeserializeBlock reads a block from a foreign peer — that is, untrusted bytes.
 // The transaction count is checked before allocating and nothing may be left over at the end.
 func DeserializeBlock(data []byte) (*Block, error) {
-	if len(data) > MaxBlockBytes {
+	if len(data) > MaxBlockWireBytes {
 		return nil, ErrBlockTooBig
 	}
-	if len(data) < HeaderBytes+4 {
+	const fixed = HeaderBytes + ShareCommitBytes
+	if len(data) < fixed+4 {
 		return nil, errShort
 	}
 	hdr, err := DeserializeHeader(data[:HeaderBytes])
 	if err != nil {
 		return nil, err
 	}
-	count := binary.LittleEndian.Uint32(data[HeaderBytes : HeaderBytes+4])
+	commit, err := DeserializeShareCommit(data[HeaderBytes:fixed])
+	if err != nil {
+		return nil, err
+	}
+	settlement, used, err := DeserializeSettlement(data[fixed:])
+	if err != nil {
+		return nil, err
+	}
+	pos := fixed + used
+	if len(data)-pos > MaxBlockBytes {
+		return nil, ErrBlockTooBig
+	}
+	if len(data)-pos < 4 {
+		return nil, errShort
+	}
+	count := binary.LittleEndian.Uint32(data[pos : pos+4])
 	if count == 0 || count > MaxBlockTxs {
 		return nil, ErrTxTooManyItems
 	}
-	b := &Block{Header: hdr, Txs: make([]*Tx, 0, count)}
-	pos := HeaderBytes + 4
+	b := &Block{Header: hdr, Share: commit, Settlement: *settlement, Txs: make([]*Tx, 0, count)}
+	pos += 4
 	for i := uint32(0); i < count; i++ {
 		tx, used, err := DeserializeTx(data[pos:])
 		if err != nil {
@@ -80,7 +111,7 @@ func DeserializeBlock(data []byte) (*Block, error) {
 //
 // The header (PoW, difficulty, time, lane rotation) is verified in HeaderChain.AddHeader — this is
 // about the transactions, the values and the coinbase.
-func (b *Block) ValidateBlock(u CoinView, params NetParams) error {
+func (b *Block) ValidateBlock(u StateView, params NetParams) error {
 	return b.validate(u, params, true)
 }
 
@@ -91,8 +122,8 @@ func (b *Block) ValidateBlock(u CoinView, params NetParams) error {
 // It answers one question after ValidateBlock has failed: is the block bad, or only this copy of it? If
 // the committed part is invalid, no witness can save the block. If it is valid, the failure came from
 // the witnesses, and those the header says nothing about.
-func (b *Block) ValidateCommitted(u CoinView, params NetParams) error {
-	bare := &Block{Header: b.Header, Txs: make([]*Tx, len(b.Txs))}
+func (b *Block) ValidateCommitted(u StateView, params NetParams) error {
+	bare := &Block{Header: b.Header, Share: b.Share, Settlement: b.Settlement, Txs: make([]*Tx, len(b.Txs))}
 	for i, tx := range b.Txs {
 		if tx == nil {
 			return ErrNoCoinbase
@@ -104,10 +135,17 @@ func (b *Block) ValidateCommitted(u CoinView, params NetParams) error {
 	return bare.validate(u, params, false)
 }
 
-func (b *Block) validate(u CoinView, params NetParams, signatures bool) error {
-	raw := b.Serialize()
-	if len(raw) > MaxBlockBytes {
+func (b *Block) validate(u StateView, params NetParams, signatures bool) error {
+	// MaxBlockBytes is the cap on everything but the settlement body, which has its own.
+	settlement := len(b.Settlement.Serialize())
+	if settlement > MaxSettlementBytes {
+		return ErrSettlementTooBig
+	}
+	if len(b.Serialize())-settlement > MaxBlockBytes {
 		return ErrBlockTooBig
+	}
+	if err := b.Settlement.CheckStructure(); err != nil {
+		return err
 	}
 	if len(b.Txs) == 0 {
 		return ErrNoCoinbase
@@ -172,23 +210,45 @@ func (b *Block) validate(u CoinView, params NetParams, signatures bool) error {
 		}
 	}
 
-	if b.Header.MerkleRoot != TxMerkleRoot(b.Txs) {
-		return ErrBadMerkle
+	if err := b.CheckRoot(); err != nil {
+		return err
 	}
-	if params.Active(ForkWitnessCommitment, height) {
-		// That the commitment is there is a property of the block. Whether the witnesses match it
-		// is a property of this copy — and ValidateCommitted has taken them out.
-		want, err := b.witnessCommitment()
-		if err != nil {
+	// That the commitment is there is a property of the block. Whether the witnesses match it is a
+	// property of this copy — and ValidateCommitted has taken them out.
+	want, err := b.witnessCommitment()
+	if err != nil {
+		return err
+	}
+	if signatures && params.Active(ForkWitnessCommitment, height) {
+		if err := b.checkWitnessesAgainst(want); err != nil {
 			return err
 		}
-		if signatures {
-			if err := b.checkWitnessesAgainst(want); err != nil {
-				return err
-			}
-		}
 	}
-	return b.checkCoinbase(height, totalFees, params)
+	return b.checkCoinbase(height, u, params)
+}
+
+// CheckRoot verifies that the header's merkle root commits to this block's share commitment and
+// transactions. It needs nothing but the block, so it can run the moment a body arrives.
+func (b *Block) CheckRoot() error {
+	if b.Share.Weight > MaxShareWeight {
+		return ErrShareWeight
+	}
+	if b.Header.MerkleRoot != ShareRoot(BodyRoot(b.Txs, &b.Settlement), &b.Share) {
+		return ErrBadMerkle
+	}
+	return nil
+}
+
+// Seal writes the header's merkle root from the share commitment and the transactions. It is
+// called once both are final.
+func (b *Block) Seal() {
+	b.Header.MerkleRoot = ShareRoot(BodyRoot(b.Txs, &b.Settlement), &b.Share)
+}
+
+// FinalityKey is the miner's finality key: the block gives it a seat in the quorum
+// (the finality spec). A block without one still counts towards the quorum's weight.
+func (b *Block) FinalityKey() ([32]byte, bool) {
+	return b.Share.FinalityKey, b.Share.HasFinalityKey()
 }
 
 // checkInputs verifies one transaction's inputs: their existence, maturity, double spending and
@@ -249,42 +309,53 @@ func (b *Block) checkInputs(tx *Tx, u CoinView, inBlock map[Outpoint]Coin,
 	return inSum - outSum, values, nil
 }
 
-// checkCoinbase verifies that the miner did not take more than theirs and that the dev fee is in place.
-func (b *Block) checkCoinbase(height uint64, fees int64, params NetParams) error {
+// checkCoinbase verifies the coinbase output by output: the dev fee first, then exactly the
+// payouts the credit state `v` the block builds on owes, then the commitment to the witnesses and
+// to that state's root. A block pays its miner nothing directly (credits.go), so there is no
+// amount left for anybody to choose.
+func (b *Block) checkCoinbase(height uint64, v CreditView, params NetParams) error {
 	cb := b.Txs[0]
 	// The height in the coinbase (what BIP34 does in Bitcoin). Without it the uniqueness of the
-	// coinbase txid rests only on a random extranonce — and two blocks with the same extranonce,
-	// the same address and the same reward have **the same txid**. Overwriting an unspent output is
-	// prevented by `ErrCoinExists`, but once it is fully spent a duplicate txid is acceptable and
-	// the transaction index then has two answers to the same question.
+	// coinbase txid rests only on a random extranonce — and two blocks with the same extranonce
+	// and the same payouts have **the same txid**. Overwriting an unspent output is prevented by
+	// `ErrCoinExists`, but once it is fully spent a duplicate txid is acceptable and the
+	// transaction index then has two answers to the same question.
 	//
 	// The first 8 B of the extranonce field are therefore the height, the remaining 24 B stay the
 	// miner's.
 	if got := binary.LittleEndian.Uint64(cb.Inputs[0].PrevTxID[0:8]); got != height {
 		return fmt.Errorf("%w: the coinbase reports height %d, the block is %d", ErrCoinbaseHeight, got, height)
 	}
-
-	var total int64
-	for _, o := range cb.Outputs {
-		total += o.Value
+	outs := cb.Outputs
+	if devFee := DevFee(height); devFee > 0 {
+		// The dev fee has to be the **first** output and has to match exactly.
+		if len(outs) == 0 || outs[0].Value != devFee || outs[0].ScriptVersion != ScriptVersionBasic ||
+			!equalBytes(outs[0].Script, params.DevFeeScriptAt(height)) {
+			return fmt.Errorf("%w: expected %d cogs first", ErrDevFeeMissing, devFee)
+		}
+		outs = outs[1:]
 	}
-	allowed := Subsidy(height) + fees
-	if total > allowed {
-		return fmt.Errorf("%w: takes %d, may take %d", ErrCoinbaseValue, total, allowed)
+	payouts, err := CreditPayouts(height, v)
+	if err != nil {
+		return err
 	}
-
-	devFee := DevFee(height)
-	if devFee == 0 {
-		return nil
+	if len(outs) != len(payouts)+1 {
+		return fmt.Errorf("%w: %d outputs after the dev fee, the queue pays %d and the commitment",
+			ErrCoinbaseValue, len(outs), len(payouts))
 	}
-	// The dev fee has to be the **first** output and has to match exactly — not "at least that much".
-	if len(cb.Outputs) == 0 {
-		return ErrDevFeeMissing
+	for i, want := range payouts {
+		got := outs[i]
+		if got.Value != want.Value || got.ScriptVersion != want.ScriptVersion || !equalBytes(got.Script, want.Script) {
+			return fmt.Errorf("%w: payout %d is %d cogs, the queue owes %d to %x",
+				ErrCoinbaseValue, i, got.Value, want.Value, want.Script[:6])
+		}
 	}
-	first := cb.Outputs[0]
-	if first.Value != devFee || first.ScriptVersion != ScriptVersionBasic ||
-		!equalBytes(first.Script, params.DevFeeScriptAt(height)) {
-		return fmt.Errorf("%w: got %d cogs, expected %d", ErrDevFeeMissing, first.Value, devFee)
+	_, creditRoot, err := b.coinbaseCommitment()
+	if err != nil {
+		return err
+	}
+	if want := v.CreditsRoot(); creditRoot != want {
+		return fmt.Errorf("%w: %x, the state is %x", ErrCreditRoot, creditRoot[:6], want[:6])
 	}
 	return nil
 }
@@ -304,37 +375,33 @@ func equalBytes(a, b []byte) bool {
 // BuildCoinbase assembles a valid coinbase transaction. Both the miner and a pool use it for a
 // template, so the dev fee rules live in one place.
 //
-// `extra` is the miner's free space (the extranonce), `minerScript` is their payout script.
-func BuildCoinbase(height uint64, fees int64, minerScript []byte, extra [32]byte,
-	params NetParams) *Tx {
-
+// A block does not pay its miner: the reward goes into the pot and the miner is paid through
+// credits (credits.go). The coinbase pays the dev fee and the `payouts` CreditPayouts names, and
+// SealCoinbase adds the commitment. `extra` is the miner's free space (the extranonce).
+func BuildCoinbase(height uint64, payouts []TxOut, extra [32]byte, params NetParams) *Tx {
 	// The first 8 B are the height (the rule in checkCoinbase), the rest is the miner's extranonce.
 	binary.LittleEndian.PutUint64(extra[0:8], height)
 	tx := &Tx{Version: 1, Inputs: []TxIn{{PrevTxID: extra, PrevIndex: CoinbaseIndex}}}
-	devFee := DevFee(height)
-	if devFee > 0 {
+	if devFee := DevFee(height); devFee > 0 {
 		tx.Outputs = append(tx.Outputs, TxOut{Value: devFee, Script: params.DevFeeScriptAt(height)})
 	}
-	minerValue := Subsidy(height) - devFee + fees
-	if minerValue > 0 {
-		tx.Outputs = append(tx.Outputs, TxOut{Value: minerValue, Script: minerScript})
-	}
-	if len(tx.Outputs) == 0 {
-		// The genesis and blocks with a zero reward need at least one output.
-		tx.Outputs = append(tx.Outputs, TxOut{Value: 0, ScriptVersion: ScriptVersionData})
+	for _, o := range payouts {
+		tx.Outputs = append(tx.Outputs, TxOut{Value: o.Value, ScriptVersion: o.ScriptVersion,
+			Script: append([]byte(nil), o.Script...)})
 	}
 	return tx
 }
 
-// SealCoinbase finishes a block's transaction list: where the rule holds, it writes the witness
-// commitment into the coinbase (txs[0]). It has to be called once the list is final and before
-// the merkle root is computed — the commitment is an output, so it changes the coinbase's txid.
-func SealCoinbase(txs []*Tx, height uint64, params NetParams) {
-	if len(txs) == 0 || !params.Active(ForkWitnessCommitment, height) {
+// SealCoinbase finishes a block's transaction list: it writes the commitment — the witness root
+// and `creditRoot`, the root of the credit state the block builds on — into the coinbase's data
+// output (txs[0]). It has to be called once the list is final and before the merkle root is
+// computed — the output is part of the coinbase's txid.
+func SealCoinbase(txs []*Tx, creditRoot [32]byte) {
+	if len(txs) == 0 {
 		return
 	}
+	out := TxOut{ScriptVersion: ScriptVersionData, Script: coinbaseCommitmentScript(WitnessMerkleRoot(txs), creditRoot)}
 	cb := txs[0]
-	out := TxOut{ScriptVersion: ScriptVersionData, Script: witnessCommitmentScript(WitnessMerkleRoot(txs))}
 	// A transaction may have one data output, so one that is already there is taken over.
 	if n := len(cb.Outputs); n > 0 && cb.Outputs[n-1].ScriptVersion == ScriptVersionData {
 		cb.Outputs[n-1] = out

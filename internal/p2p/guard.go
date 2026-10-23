@@ -357,20 +357,24 @@ func (g *Gate) Stats() (pending, hosts, groups int) {
 
 // ---------------------------------------------------------------- the per-peer limit
 
-// PeerLimits bound how much one peer may send. An honest peer does not come close to them: the
-// largest legitimate message is a block (256 kB) and blocks arrive once every two minutes.
+// PeerLimits bound how much one peer may send. An honest peer does not come close to them. The
+// most frequent legitimate message is a share: the network finds 100 a second and a peer relays
+// every one it verified, more while a jump in hashrate waits for the retarget (an hour's half-life)
+// — so the message rate leaves room for five times that, besides the pings, transactions and
+// attestations. The largest message is a block with its settlement body (chain.MaxBlockWireBytes),
+// one every 30 s.
 type PeerLimits struct {
 	MsgRate, MsgBurst     float64 // messages per second
 	BytesRate, BytesBurst float64 // bytes per second
 }
 
 func InboundPeerLimits() PeerLimits {
-	return PeerLimits{MsgRate: 100, MsgBurst: 500, BytesRate: 2 << 20, BytesBurst: 8 << 20}
+	return PeerLimits{MsgRate: 600, MsgBurst: 3000, BytesRate: 2 << 20, BytesBurst: 8 << 20}
 }
 
 // OutboundPeerLimits are looser: we download blocks from these peers ourselves, and fast during a sync.
 func OutboundPeerLimits() PeerLimits {
-	return PeerLimits{MsgRate: 400, MsgBurst: 2000, BytesRate: 32 << 20, BytesBurst: 64 << 20}
+	return PeerLimits{MsgRate: 2400, MsgBurst: 12000, BytesRate: 32 << 20, BytesBurst: 64 << 20}
 }
 
 // PeerMeter measures one peer.

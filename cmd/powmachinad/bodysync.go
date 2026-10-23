@@ -39,7 +39,7 @@ import (
 
 const (
 	// bodySyncInterval is how often the driver looks at what is missing. With a block every
-	// 120 s this is often enough for a new body to arrive at once, and rare enough to cost nothing.
+	// 30 s this is often enough for a new body to arrive at once, and rare enough to cost nothing.
 	bodySyncInterval = 2 * time.Second
 	// poolExpireInterval is how often old entries are thrown out of the mempool and the orphan
 	// pool. Expiry is in hours (mempool) and tens of minutes (orphan), so anything more
@@ -309,7 +309,7 @@ func (n *Node) SyncBodiesOnce(now time.Time) {
 		n.bodies.retryAll(now)
 	}
 	// The oldest missing body is asked of **every** peer at once, the rest are split between
-	// them. One body is at most 256 kB and it verifies itself against the manifest, so a
+	// them. One body is at most 352 kB and it verifies itself against the manifest, so a
 	// duplicate costs only bandwidth — whereas waiting for a single peer costs a whole timeout,
 	// and the block cannot be applied without it, nor can any block above it. That is how one
 	// body can hold the UTXO set of every node minutes behind the headers while the blocks
@@ -569,6 +569,14 @@ func (n *Node) ApplyReadyBodies() error {
 					failed = b
 					return verr
 				}
+				// The settlement is under the header (the body root), so a bad one is the
+				// block's, never the copy's.
+				if serr := n.checkSettlement(b); serr != nil {
+					if !errors.Is(serr, chain.ErrSettlementUnchecked) {
+						failed = b
+					}
+					return serr
+				}
 				return nil
 			},
 			Applied: func(b *chain.Block) {
@@ -613,6 +621,17 @@ func (n *Node) ApplyReadyBodies() error {
 type checkedCoins struct {
 	s   *store.Store
 	err error
+}
+
+func (c *checkedCoins) Pot() int64            { return c.s.Pot() }
+func (c *checkedCoins) CreditsRoot() [32]byte { return c.s.CreditsRoot() }
+
+func (c *checkedCoins) ForEachCredit(fn func([32]byte, chain.Credit) error) error {
+	err := c.s.ForEachCredit(fn)
+	if err != nil && c.err == nil {
+		c.err = err
+	}
+	return err
 }
 
 func (c *checkedCoins) Get(op chain.Outpoint) (chain.Coin, bool) {
@@ -919,5 +938,8 @@ func (n *Node) onBlockApplied(b *chain.Block) {
 	}
 	n.resolveOrphans(parents, "")
 	n.warmNextEpoch(uint64(b.Header.Height))
-	n.attestTip()
+	n.attestTip(b)
+	if _, tip, _ := n.chain.Tip(); tip == uint64(b.Header.Height) {
+		n.shares.Expire(tip)
+	}
 }

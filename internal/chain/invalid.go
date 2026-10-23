@@ -48,6 +48,7 @@ func (hc *HeaderChain) Invalidate(id [32]byte) (newTip [32]byte, changed bool, e
 		return hc.tip.id, false, nil
 	}
 	hc.invalid[id] = true
+	hc.retaintLocked()
 
 	old := hc.tip
 	hc.tip = hc.bestValidLocked()
@@ -63,6 +64,7 @@ func (hc *HeaderChain) MarkInvalidLoaded(id [32]byte) {
 		hc.invalid = make(map[[32]byte]bool)
 	}
 	hc.invalid[id] = true
+	hc.retaintLocked()
 }
 
 // IsInvalid says whether a block is marked invalid or grows out of one.
@@ -70,7 +72,7 @@ func (hc *HeaderChain) IsInvalid(id [32]byte) bool {
 	hc.mu.RLock()
 	defer hc.mu.RUnlock()
 	if n, ok := hc.byID[id]; ok {
-		return hc.hasInvalidAncestorLocked(n, map[[32]byte]bool{})
+		return n.tainted
 	}
 	return hc.invalid[id]
 }
@@ -92,10 +94,9 @@ func (hc *HeaderChain) InvalidIDs() [][32]byte {
 // It walks every known node — this only happens on an invalidation, not in ordinary operation.
 // With equal work the lower id decides, so the result is the same on every node.
 func (hc *HeaderChain) bestValidLocked() *node {
-	memo := make(map[[32]byte]bool, len(hc.byID))
 	best := hc.byID[hc.genesis]
 	for _, n := range hc.byID {
-		if hc.hasInvalidAncestorLocked(n, memo) || hc.hasParkedAncestorLocked(n) {
+		if n.tainted || hc.hasParkedAncestorLocked(n) {
 			continue
 		}
 		switch n.work.Cmp(best.work) {
@@ -108,6 +109,15 @@ func (hc *HeaderChain) bestValidLocked() *node {
 		}
 	}
 	return best
+}
+
+// retaintLocked recomputes `tainted` on every node after a mark was added. It walks each node at
+// most once (the memo), and it only runs on an invalidation or when the marks are loaded.
+func (hc *HeaderChain) retaintLocked() {
+	memo := make(map[[32]byte]bool, len(hc.byID))
+	for _, n := range hc.byID {
+		n.tainted = hc.hasInvalidAncestorLocked(n, memo)
+	}
 }
 
 // hasInvalidAncestorLocked walks down from a node until it hits an invalid block, the genesis or a

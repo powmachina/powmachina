@@ -29,9 +29,9 @@ func buildChain(n int) []*chain.Block {
 				Version: 1, PrevBlock: prev, Bits: chain.RegtestTargetBits,
 				Height: uint32(h), Time: uint32(1_700_000_000 + h*120), Lane: 1,
 			},
-			Txs: []*chain.Tx{chain.BuildCoinbase(uint64(h), 0, key, extra, chain.RegTest)},
+			Txs: []*chain.Tx{chain.BuildCoinbase(uint64(h), nil, extra, chain.RegTest)},
 		}
-		b.Header.MerkleRoot = chain.TxMerkleRoot(b.Txs)
+		b.Seal()
 		prev = b.Header.ID()
 		out = append(out, b)
 	}
@@ -157,8 +157,9 @@ func (s *swapsBody) Fetch(ctx context.Context, ids [][32]byte) ([]*chain.Block, 
 	extra[0] = 0xBB
 	fake := &chain.Block{
 		Header: victim.Header,
-		Txs:    []*chain.Tx{chain.BuildCoinbase(uint64(victim.Header.Height), 0, key, extra, chain.RegTest)},
+		Txs:    []*chain.Tx{chain.BuildCoinbase(uint64(victim.Header.Height), nil, extra, chain.RegTest)},
 	}
+	fake.Txs[0].Outputs = append(fake.Txs[0].Outputs, chain.TxOut{Value: 1, Script: key})
 	res := append([]*chain.Block{fake}, out[1:]...)
 	return res, nil
 }
@@ -198,7 +199,7 @@ func TestRejectsSwappedBody(t *testing.T) {
 		if got == nil {
 			t.Fatalf("the block %d is missing", b.Header.Height)
 		}
-		if chain.TxMerkleRoot(got.Txs) != b.Header.MerkleRoot {
+		if got.CheckRoot() != nil {
 			t.Fatalf("the block %d has a planted body in the sink", b.Header.Height)
 		}
 	}

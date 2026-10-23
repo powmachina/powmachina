@@ -148,6 +148,13 @@ func asertChain(t *testing.T, params NetParams) (*HeaderChain, *Header, *uint32)
 	return hc, &g, &now
 }
 
+// The block times in seconds, as the headers carry them.
+const (
+	netSecs    = uint32(BlockTime / time.Second)
+	laneSecs   = uint32(LaneBlockTime / time.Second)
+	reliefSecs = uint32(LaneRotationRelief / time.Second)
+)
+
 func grow(t *testing.T, hc *HeaderChain, lane mh.Lane, at uint32) *Header {
 	t.Helper()
 	h := laneHeader(t, hc, lane, at)
@@ -176,7 +183,7 @@ func TestAsertClockStartsAtTheFirstBlock(t *testing.T) {
 	grow(t, hc, mh.LaneC, *now)
 
 	// Both lanes are one block time "ahead" right after the first block, whichever mined it.
-	want := asertNext(t, g.Bits, -240)
+	want := asertNext(t, g.Bits, -int64(laneSecs))
 	for _, lane := range mh.Lanes {
 		if got := nextBits(t, hc, lane); got != want {
 			t.Fatalf("lane %s after the first block: %08x, expected %08x", lane, got, want)
@@ -190,16 +197,16 @@ func TestLaneWithoutABlockGetsEasierWithTime(t *testing.T) {
 	hc, g, now := asertChain(t, RegTest)
 	start := *now
 	grow(t, hc, mh.LaneC, start)
-	*now = start + 240
-	grow(t, hc, mh.LaneC, start+240)
+	*now = start + laneSecs
+	grow(t, hc, mh.LaneC, start+laneSecs)
 	// Lane C alone from here: one block per relief.
-	at := start + 240
-	for at < start+3600+240 {
-		at += 901
+	at := start + laneSecs
+	for at < start+3600+laneSecs {
+		at += reliefSecs + 1
 		*now = at
 		grow(t, hc, mh.LaneC, at)
 	}
-	want := asertNext(t, g.Bits, int64(at-start)-240)
+	want := asertNext(t, g.Bits, int64(at-start)-int64(laneSecs))
 	if got := nextBits(t, hc, mh.LaneG); got != want {
 		t.Fatalf("lane G after %d s without a block: %08x, expected %08x", at-start, got, want)
 	}
@@ -210,25 +217,26 @@ func TestLaneWithoutABlockGetsEasierWithTime(t *testing.T) {
 
 // What the rule is for. Lane G leaves; lane C keeps the chain going through the relief. Lane
 // G's difficulty has to come down with the clock, and lane C's has to stay where it was — its
-// blocks are 15 minutes apart because it had to wait, not because it got weaker.
+// blocks are a relief apart because it had to wait, not because it got weaker.
 func TestSilentLaneEasesAndTheMiningLaneDoesNot(t *testing.T) {
 	hc, _, now := asertChain(t, RegTest)
 	at := *now
 	for i := 0; i < 40; i++ { // both lanes on pace
 		grow(t, hc, mh.Lanes[i%2], at)
-		at += 120
+		at += netSecs
 		*now = at
 	}
 	gBefore, cBefore := nextBits(t, hc, mh.LaneG), nextBits(t, hc, mh.LaneC)
 
-	// The last block was lane G. Lane C mines two, then one per relief plus its block time.
+	// The last block was lane G. Lane C mines two, then one per relief plus its block time, for
+	// six hours.
 	grow(t, hc, mh.LaneC, at)
-	at += 240
+	at += laneSecs
 	*now = at
 	grow(t, hc, mh.LaneC, at)
 	cAlone := nextBits(t, hc, mh.LaneC)
-	for i := 0; i < 20; i++ {
-		at += 900 + 240
+	for i := 0; i < int(6*3600/(reliefSecs+laneSecs)); i++ {
+		at += reliefSecs + laneSecs
 		*now = at
 		grow(t, hc, mh.LaneC, at)
 		if got := nextBits(t, hc, mh.LaneC); got != cAlone {
@@ -303,18 +311,19 @@ func TestLaneDifficultyStartsAtItsHeight(t *testing.T) {
 		if h.Lane == mh.LaneC {
 			lastC = h
 		}
-		at += 120
+		at += netSecs
 		*now = at
 	}
-	// Lane C's last block is 28, built on 27, and the tip is 29: 240 s, on pace.
+	// Lane C's last block is 28, built on 27, and the tip is 29: a lane block time, on pace.
 	if lastC.Height != forkAt-2 {
 		t.Fatalf("test assumption: lane C's last block is %d", lastC.Height)
 	}
 	if got := nextBits(t, hc, mh.LaneC); got != g.Bits {
 		t.Fatalf("the first block under the rule, on pace: %08x, expected %08x", got, g.Bits)
 	}
-	// Lane G's last block is the tip, built 120 s before it: it is half a block time ahead.
-	if got, want := nextBits(t, hc, mh.LaneG), asertNext(t, g.Bits, 120-240); got != want {
+	// Lane G's last block is the tip, built a network block time before it: it is half a lane
+	// block time ahead.
+	if got, want := nextBits(t, hc, mh.LaneG), asertNext(t, g.Bits, int64(netSecs)-int64(laneSecs)); got != want {
 		t.Fatalf("lane G at the fork: %08x, expected %08x", got, want)
 	}
 }

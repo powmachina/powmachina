@@ -123,7 +123,7 @@ func TestEpochForHeight(t *testing.T) {
 	if EpochForHeight(0) != 0 {
 		t.Fatal("height 0 should be epoch 0")
 	}
-	if EpochForHeight(5000) != 1 || EpochForHeight(4999) != 0 {
-		t.Fatalf("the epoch boundary does not match: %d %d", EpochForHeight(4999), EpochForHeight(5000))
+	if EpochForHeight(20_000) != 1 || EpochForHeight(19_999) != 0 {
+		t.Fatalf("the epoch boundary does not match: %d %d", EpochForHeight(19_999), EpochForHeight(20_000))
 	}
 }

@@ -34,7 +34,8 @@ func rawPeer(t *testing.T, addr p2p.Address, nonce uint64) *p2p.Conn {
 func TestAttestationIsForwardedOnlyOnce(t *testing.T) {
 	node, addr, cleanup := listeningNode(t)
 	defer cleanup()
-	if err := node.MineBlocks(int(chain.FinalityDepth) + 1); err != nil {
+	node.noAttest = true
+	if err := node.MineBlocks(finalityBlocks); err != nil {
 		t.Fatal(err)
 	}
 	_, height, _ := node.chain.Tip()
@@ -56,7 +57,7 @@ func TestAttestationIsForwardedOnlyOnce(t *testing.T) {
 		return len(node.conns) == 2
 	}, "the node did not register both connections")
 
-	att := chain.Sign(chain.RegtestSignerKey(0), 0, target, id)
+	att := chain.Sign(node.signer.priv, target, id)
 	payload, err := p2p.EncodeAttestation(att)
 	if err != nil {
 		t.Fatal(err)

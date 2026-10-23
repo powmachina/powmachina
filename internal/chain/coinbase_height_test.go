@@ -16,7 +16,7 @@ func TestCoinbaseMustCarryHeight(t *testing.T) {
 
 	// BuildCoinbase fills the height in itself, even when given an all-zero extranonce.
 	var extra [32]byte
-	cb := BuildCoinbase(h, 0, []byte("miner"), extra, p)
+	cb := BuildCoinbase(h, nil, extra, p)
 	if got := binary.LittleEndian.Uint64(cb.Inputs[0].PrevTxID[0:8]); got != h {
 		t.Fatalf("BuildCoinbase did not write the height: %d", got)
 	}
@@ -25,20 +25,20 @@ func TestCoinbaseMustCarryHeight(t *testing.T) {
 	for i := 8; i < 32; i++ {
 		mine[i] = byte(i)
 	}
-	cb2 := BuildCoinbase(h, 0, []byte("miner"), mine, p)
+	cb2 := BuildCoinbase(h, nil, mine, p)
 	for i := 8; i < 32; i++ {
 		if cb2.Inputs[0].PrevTxID[i] != byte(i) {
 			t.Fatalf("the extranonce was overwritten at byte %d", i)
 		}
 	}
 	// And two blocks at different heights have different txids even with the same extranonce and reward.
-	if BuildCoinbase(h, 0, []byte("miner"), mine, p).TxID() ==
-		BuildCoinbase(h+1, 0, []byte("miner"), mine, p).TxID() {
+	if BuildCoinbase(h, nil, mine, p).TxID() ==
+		BuildCoinbase(h+1, nil, mine, p).TxID() {
 		t.Fatal("the coinbases of two heights have the same txid")
 	}
 
 	// A block with a coinbase without the height has to be refused.
-	bad := coinbaseTx(h, MinerSubsidy(h), p)
+	bad := coinbaseTx(h, 0, p)
 	bad.Inputs[0].PrevTxID = [32]byte{} // the height gone
 	blk := blockWith(h, []*Tx{bad})
 	if err := blk.ValidateBlock(NewUTXOSet(), p); !errors.Is(err, ErrCoinbaseHeight) {
@@ -46,7 +46,7 @@ func TestCoinbaseMustCarryHeight(t *testing.T) {
 	}
 
 	// And so does a coinbase with somebody else's height.
-	wrong := coinbaseTx(h, MinerSubsidy(h), p)
+	wrong := coinbaseTx(h, 0, p)
 	binary.LittleEndian.PutUint64(wrong.Inputs[0].PrevTxID[0:8], h+1)
 	blk2 := blockWith(h, []*Tx{wrong})
 	if err := blk2.ValidateBlock(NewUTXOSet(), p); !errors.Is(err, ErrCoinbaseHeight) {

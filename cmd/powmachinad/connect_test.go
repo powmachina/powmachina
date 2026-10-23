@@ -26,6 +26,44 @@ func listeningNode(t *testing.T) (*Node, p2p.Address, func()) {
 	return node, addr, func() { ln.Close(); node.Close() }
 }
 
+// An -addnode peer on a private address stays out of the addrman on a public network, and the
+// node keeps it connected anyway — and connects again once the connection drops.
+func TestPrivateAddnodePeerIsKeptConnected(t *testing.T) {
+	sibling := NewNode(chain.TestNet, chain.TestnetGenesis(), mh.TestProfile)
+	defer sibling.Close()
+	ln, err := p2p.Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go sibling.Listen(ln)
+
+	params := chain.TestNet
+	params.DNSSeeds, params.FixedSeeds = nil, nil // the seeds would only add public addresses
+	node := NewNode(params, chain.TestnetGenesis(), mh.TestProfile)
+	defer node.Close()
+	node.Bootstrap(context.Background(), []string{ln.Addr().String()})
+	if fresh, tried := node.addrs.Size(); len(node.privatePeers) != 1 || fresh+tried != 0 {
+		t.Fatalf("%d private peers, %d addresses in the addrman", len(node.privatePeers), fresh+tried)
+	}
+	connected := func() bool {
+		node.mu.Lock()
+		defer node.mu.Unlock()
+		_, ok := node.conns[node.privatePeers[0].String()]
+		return ok
+	}
+	node.keepPrivatePeers()
+	waitFor(t, 2*time.Second, connected, "the private peer was not connected")
+
+	node.mu.Lock()
+	c := node.conns[node.privatePeers[0].String()]
+	node.mu.Unlock()
+	c.Close()
+	waitFor(t, 2*time.Second, func() bool { return !connected() }, "the dropped connection stayed")
+	node.keepPrivatePeers()
+	waitFor(t, 2*time.Second, connected, "the private peer was not connected again")
+}
+
 // The feeler has to try an unverified address and move it among the verified ones — and not keep the connection.
 func TestFeelerPromotesWorkingAddress(t *testing.T) {
 	_, peerAddr, cleanup := listeningNode(t)

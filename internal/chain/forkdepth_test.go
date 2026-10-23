@@ -25,7 +25,7 @@ func mainChain(t *testing.T, params NetParams, n int) (*HeaderChain, []*Header) 
 			lane = mh.LaneG
 		}
 		h := &Header{Version: 1, PrevBlock: prev, Bits: g.Bits, Height: uint32(i),
-			Time: g.Time + uint32(i)*120, Lane: lane}
+			Time: g.Time + uint32(i)*netSecs, Lane: lane}
 		if err := hc.LoadHeader(h); err != nil {
 			t.Fatalf("block %d: %v", i, err)
 		}
@@ -55,8 +55,9 @@ func sideHeader(t *testing.T, hc *HeaderChain, parent *Header) *Header {
 
 // A branch forking shallower than ReorgLimit is stored — it could win one day.
 func TestSideBranchWithinReorgLimitIsKept(t *testing.T) {
-	hc, hs := mainChain(t, RegTest, 700)
-	h := sideHeader(t, hc, hs[690])
+	n := int(ReorgLimit) + 200
+	hc, hs := mainChain(t, RegTest, n)
+	h := sideHeader(t, hc, hs[n-10])
 	if _, err := hc.AddHeader(h, acceptPoW{}); err != nil {
 		t.Fatalf("a branch 10 blocks below the tip was refused: %v", err)
 	}
@@ -65,16 +66,17 @@ func TestSideBranchWithinReorgLimitIsKept(t *testing.T) {
 // A branch forking deeper than ReorgLimit is refused right away — the node would never switch to
 // it, and storing it would let an attacker fill memory with cheap headers from early heights.
 func TestForkDeeperThanReorgLimitIsRejected(t *testing.T) {
-	hc, hs := mainChain(t, RegTest, 700)
+	n := int(ReorgLimit) + 200
+	hc, hs := mainChain(t, RegTest, n)
 	h := sideHeader(t, hc, hs[100])
 	if _, err := hc.AddHeader(h, acceptPoW{}); !errors.Is(err, ErrForkTooDeep) {
-		t.Fatalf("a branch 600 blocks below the tip: %v, expected ErrForkTooDeep", err)
+		t.Fatalf("a branch %d blocks below the tip: %v, expected ErrForkTooDeep", n-100, err)
 	}
 }
 
 // The depth rule is checked before PoW — a refusal must not cost a PoW computation.
 func TestDeepForkRejectedBeforePoW(t *testing.T) {
-	hc, hs := mainChain(t, RegTest, 700)
+	hc, hs := mainChain(t, RegTest, int(ReorgLimit)+200)
 	h := sideHeader(t, hc, hs[50])
 	var called bool
 	check := powFunc(func(*Header) (bool, error) { called = true; return true, nil })

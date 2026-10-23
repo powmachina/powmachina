@@ -52,7 +52,8 @@ func New(addr, token string) *Client {
 	return &Client{url: url, token: token, http: &http.Client{Timeout: 60 * time.Second}}
 }
 
-// MaxResponseBytes: 100 blocks of 256 kB in hex is ~52 MB; the cap has some headroom.
+// MaxResponseBytes: 100 blocks at their limit (chain.MaxBlockWireBytes, 352 kB) in hex is ~72 MB;
+// the cap has some headroom.
 const MaxResponseBytes = 128 << 20
 
 // ErrRPC is an error the node returned (not a network error).
@@ -190,7 +191,7 @@ func (c *Client) Blocks(from uint64, count int) ([]*chain.Block, error) {
 		if err != nil || b.Header.ID() != id || uint64(b.Header.Height) != r.Height {
 			return nil, fmt.Errorf("%w: block %d does not match its ID", ErrRPC, r.Height)
 		}
-		if chain.TxMerkleRoot(b.Txs) != b.Header.MerkleRoot {
+		if b.CheckRoot() != nil {
 			return nil, fmt.Errorf("%w: block %d has transactions that do not match its header", ErrRPC, r.Height)
 		}
 		out = append(out, b)
@@ -268,6 +269,18 @@ func (c *Client) SubmitBlock(b *chain.Block) error {
 	ctx, cancel := c.ctx()
 	defer cancel()
 	return c.Call(ctx, "submitblock", map[string]any{"hex": hex.EncodeToString(b.Serialize())}, nil)
+}
+
+// SubmitShare sends a Sharepool share to the node and returns whether it is a block too.
+func (c *Client) SubmitShare(s *chain.Share) (bool, error) {
+	ctx, cancel := c.ctx()
+	defer cancel()
+	raw := s.Serialize()
+	var out struct {
+		Block bool `json:"block"`
+	}
+	err := c.Call(ctx, "submitshare", map[string]any{"hex": hex.EncodeToString(raw[:])}, &out)
+	return out.Block, err
 }
 
 // Network returns the name of the node's network (mainnet, testnet, regtest).

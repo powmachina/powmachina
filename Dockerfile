@@ -6,7 +6,7 @@
 #   docker run --rm -it -v ./data/wallet:/data --entrypoint powmachina-wallet-cli powmachina \
 #       --regtest --generate-new-wallet /data/exchange
 
-FROM golang:1.26-bookworm AS build
+FROM golang:1.27-bookworm AS build
 
 # RandomX is C++ and is compiled through cgo right in `go build`.
 RUN apt-get update && apt-get install -y --no-install-recommends build-essential \
@@ -22,16 +22,15 @@ COPY . .
 
 RUN CGO_ENABLED=1 go build -trimpath -ldflags="-s -w" -o /out/ \
         ./cmd/powmachinad ./cmd/powmachina-wallet-cli ./cmd/powmachina-wallet-rpc \
-        ./cmd/powmachina-miner ./cmd/powmachina-finality-signer
+        ./cmd/powmachina-miner
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates libstdc++6 \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -r -u 10001 -m -d /data powm
-# The node, the wallet, the miner and the quorum signer in one image; which program runs is decided by
-# the `entrypoint` in compose. The signer is deliberately started on a **different machine than the
-# node** (the finality spec, §5) — the image is the same, the deployment is not.
+# The node, the wallet and the miner in one image; which program runs is decided by the `entrypoint`
+# in compose.
 COPY --from=build /out/ /usr/local/bin/
 # BSD-3 (ours and RandomX's) asks for a copyright notice in binary distribution too — an image is one.
 COPY --from=build /src/LICENSE /src/NOTICE /usr/share/doc/powmachina/

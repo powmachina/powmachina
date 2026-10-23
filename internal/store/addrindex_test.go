@@ -26,7 +26,7 @@ func spendChain(t *testing.T) (blocks []*chain.Block, keyA, keyB [32]byte) {
 			Time: 1_700_000_000, Lane: 1},
 		Txs: []*chain.Tx{cb},
 	}
-	genesis.Header.MerkleRoot = chain.TxMerkleRoot(genesis.Txs)
+	genesis.Seal()
 
 	cb2 := &chain.Tx{
 		Version: 1,
@@ -48,7 +48,7 @@ func spendChain(t *testing.T) (blocks []*chain.Block, keyA, keyB [32]byte) {
 			Bits: chain.RegtestTargetBits, Height: 1, Time: 1_700_000_120, Lane: 1},
 		Txs: []*chain.Tx{cb2, spend},
 	}
-	second.Header.MerkleRoot = chain.TxMerkleRoot(second.Txs)
+	second.Seal()
 	return []*chain.Block{genesis, second}, keyA, keyB
 }
 

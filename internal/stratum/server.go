@@ -30,6 +30,8 @@ type Backend interface {
 	// PoWHash computes a header's PoW hash (verifying a share).
 	PoWHash(h *chain.Header) ([32]byte, error)
 	SubmitBlock(b *chain.Block) error
+	// SubmitShare passes a device's Sharepool share to the node (the Sharepool spec §2).
+	SubmitShare(s *chain.Share) (bool, error)
 }
 
 // ServerOptions are the server's settings.
@@ -391,15 +393,34 @@ func (c *sconn) pushJobs() {
 
 func (c *sconn) pushJob(id mh.Lane) {
 	t, err := c.s.b.WorkTemplate(id)
-	var j *work.Job
+	var block [32]byte
 	if err == nil {
-		c.mu.Lock()
-		payout := c.payout
-		c.mu.Unlock()
-		j, err = work.Build(t, payout, c.s.b.Params())
+		var bits uint32
+		if bits, err = work.ParseBits(t.Bits); err == nil {
+			block, err = chain.CompactToTarget(bits)
+		}
 	}
 	c.mu.Lock()
 	st := c.lanes[id]
+	payout := c.payout
+	blockN := new(big.Int).SetBytes(block[:])
+	if err == nil {
+		if st.target == nil {
+			// The start: 256× easier than a block (capped at the network's easiest target). Vardiff evens it out within minutes.
+			st.target = new(big.Int).Lsh(blockN, 8)
+		}
+		st.target = clampTarget(st.target, blockN, c.s.b.Params())
+	}
+	var target [32]byte
+	if st.target != nil {
+		st.target.FillBytes(target[:])
+	}
+	c.mu.Unlock()
+	var j *work.Job
+	if err == nil {
+		j, err = work.BuildShares(t, payout, deviceWeight(t, target), c.s.b.Params())
+	}
+	c.mu.Lock()
 	if err != nil {
 		wasPaused := st.paused
 		st.paused = true
@@ -412,19 +433,30 @@ func (c *sconn) pushJob(id mh.Lane) {
 	}
 	st.paused = false
 	j.ID = fmt.Sprintf("%s%x", id, c.s.seq.Add(1))
-	block := new(big.Int).SetBytes(j.BlockTarget[:])
-	if st.target == nil {
-		// The start: 256× easier than a block (capped at the network's easiest target). Vardiff evens it out within minutes.
-		st.target = new(big.Int).Lsh(block, 8)
-	}
-	st.target = clampTarget(st.target, block, c.s.b.Params())
-	st.target.FillBytes(j.Target[:])
+	j.Target = target
 	st.jobs = append(st.jobs, &issued{Job: j, seen: map[uint64]struct{}{}})
 	if len(st.jobs) > 8 {
 		st.jobs = st.jobs[len(st.jobs)-8:]
 	}
 	c.mu.Unlock()
 	c.notify("job", JobParamsFrom(j))
+}
+
+// deviceWeight is the Sharepool weight of a device's job: the heaviest whose target every share at
+// the device's stratum `target` still meets, so that each of them is a Sharepool share and counts
+// for as much as it can. A device on an easier target than the lightest share gets weight 0, and
+// only its shares that meet it go on.
+func deviceWeight(t *work.Template, target [32]byte) uint8 {
+	bits, err := work.ParseBits(t.Bits)
+	if err != nil {
+		return chain.MaxShareWeight
+	}
+	for w := chain.MaxShareWeight; w > 0; w-- {
+		if st, err := chain.ShareTarget(bits, uint8(w)); err == nil && mh.MeetsTarget(&target, &st) {
+			return uint8(w)
+		}
+	}
+	return 0
 }
 
 // clampTarget keeps the share target between the block's target (never harder) and the network's easiest target.
@@ -516,6 +548,12 @@ func (c *sconn) submit(raw json.RawMessage) (*SubmitResult, *Error) {
 		} else {
 			isBlock = true
 			c.s.opt.Log.Printf("stratum: BLOCK FOUND by %s (%s), lane %s, height %d", c.worker, c.addr, job.Lane, job.Height)
+		}
+	}
+	// A block is its own share; any other that meets the job's Sharepool target goes to the node.
+	if !isBlock && job.Shares && mh.MeetsTarget(&hash, &job.ShareTarget) {
+		if _, err := c.s.b.SubmitShare(job.ShareAt(nonce)); err != nil {
+			c.s.opt.Log.Printf("stratum: share from %s/%s refused by node: %v", c.addr, c.worker, err)
 		}
 	}
 	c.mu.Lock()

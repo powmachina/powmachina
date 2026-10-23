@@ -55,13 +55,30 @@ func (n *Node) Finality() (uint64, [32]byte, bool) {
 	return n.finality.Finalized()
 }
 
-// SubmitAttestation accepts a finality attestation from a quorum signer. The signature check
-// and the relay go through the same path as attestations from the network.
-func (n *Node) SubmitAttestation(att chain.Attestation) error {
+// FinalityStatus implements rpc.Backend: the quorum of the block the network is signing now.
+func (n *Node) FinalityStatus() rpc.FinalityStatus {
 	if n.finality == nil {
-		return errors.New("the network has no finality quorum (it runs plain PoW)")
+		return rpc.FinalityStatus{}
 	}
-	return n.acceptAttestation(att, "")
+	st := rpc.FinalityStatus{Enabled: true, Window: n.params.FinalityWindow, Key: n.FinalityKey(),
+		Caught: len(n.finality.Caught())}
+	_, tip, _ := n.chain.Tip()
+	if tip < chain.FinalityDepth {
+		return st
+	}
+	st.PendingHeight = tip - chain.FinalityDepth
+	id, ok := n.chain.BlockIDAt(st.PendingHeight)
+	q := n.quorumAt(st.PendingHeight)
+	if !ok || q == nil {
+		return st
+	}
+	st.PendingBlock = id
+	st.Members, st.Total = q.Members(), q.Total()
+	st.Signed = n.finality.Signed(st.PendingHeight, id, q)
+	if st.Key != nil {
+		st.Own = q.Weight(*st.Key)
+	}
+	return st
 }
 
 // SubmitTx puts a transaction into the mempool and relays it to the network. The validation
@@ -180,7 +197,7 @@ func (n *Node) Template(lane mh.Lane) (*rpc.Template, error) {
 	if !n.params.Active(chain.ForkLaneDifficulty, next) && tip.Time >= minTime {
 		minTime = tip.Time + 1
 	}
-	return &rpc.Template{
+	t := &rpc.Template{
 		Height:    next,
 		Lane:      lane.String(),
 		Bits:      fmt.Sprintf("%08x", bits),
@@ -193,7 +210,32 @@ func (n *Node) Template(lane mh.Lane) (*rpc.Template, error) {
 		TxIDs:     ids,
 		Txs:       raws,
 		SizeLimit: chain.MaxBlockBytes - chain.MaxCoinbaseBytes,
-	}, nil
+	}
+	if key := n.FinalityKey(); key != nil {
+		t.FinalityKey = fmt.Sprintf("%x", key[:])
+	}
+	settlement, err := n.templateSettlement(tipID, height)
+	if err != nil {
+		return nil, err
+	}
+	if t.Shares = len(settlement.Shares); t.Shares > 0 {
+		t.Settlement = fmt.Sprintf("%x", settlement.Serialize())
+	}
+	// The coinbase pays what the credit state of the tip owes; that state has to be the tip's.
+	if st, err := n.store.Tip(); err != nil || st.ID != tipID {
+		return nil, errors.New("the state is not at the tip yet — no work until the tip is applied")
+	}
+	payouts, err := chain.CreditPayouts(next, n.store)
+	if err != nil {
+		return nil, err
+	}
+	for _, o := range payouts {
+		t.Payouts = append(t.Payouts, rpc.Payout{Value: o.Value, Script: fmt.Sprintf("%x", o.Script)})
+	}
+	root := n.store.CreditsRoot()
+	t.CreditRoot = fmt.Sprintf("%x", root[:])
+	t.TakesShares = n.epochs.isFull()
+	return t, nil
 }
 
 // Tx finds a transaction by txid. It needs the index on (-txindex); without it, it returns

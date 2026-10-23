@@ -172,7 +172,7 @@ func TestDagGrowthIsCapped(t *testing.T) {
 	if dagBytesForEpoch(1_000_000) != DagMaxBytes {
 		t.Fatal("the DAG outgrew the cap")
 	}
-	// with a 120 s block and an epoch of 5 000 blocks: 5 years ≈ 263 epochs, 10 years ≈ 526
+	// with an epoch of 20 000 blocks at 30 s (6.9 days): 5 years ≈ 263 epochs, 10 years ≈ 526
 	if dagBytesForEpoch(263) >= 3<<30 {
 		t.Fatal("after 5 years the DAG should stay below 3 GiB")
 	}

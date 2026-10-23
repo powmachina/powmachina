@@ -38,27 +38,29 @@ func buildLanes(t *testing.T, lanes []mh.Lane, spacing uint32) *HeaderChain {
 // The share of blocks has to match what was really mined — that is the metric that shows whether
 // CPU/GPU parity works.
 func TestLaneStatsShareMatchesMinedBlocks(t *testing.T) {
-	// 20 blocks, alternating C and G — the share should be exactly half and half.
-	lanes := make([]mh.Lane, 0, 20)
-	for i := range 20 {
+	// Two of the shortest windows, alternating C and G — the share should be exactly half and half.
+	n := 2 * LaneWindows[0]
+	lanes := make([]mh.Lane, 0, n)
+	for i := range n {
 		if i%2 == 0 {
 			lanes = append(lanes, mh.LaneC)
 		} else {
 			lanes = append(lanes, mh.LaneG)
 		}
 	}
-	st := buildLanes(t, lanes, 120).LaneStats()
+	st := buildLanes(t, lanes, netSecs).LaneStats()
 
-	if st.TipHeight != 20 {
-		t.Fatalf("height %d, expected 20", st.TipHeight)
+	if st.TipHeight != uint64(n) {
+		t.Fatalf("height %d, expected %d", st.TipHeight, n)
 	}
 	if len(st.Lanes) != len(mh.Lanes) {
 		t.Fatalf("the statistics have %d lanes, consensus has %d", len(st.Lanes), len(mh.Lanes))
 	}
-	// In the window of 10 both have five blocks each.
+	// In the shortest window both have half of it.
 	for _, l := range st.Lanes {
-		if l.BlocksInWindow[0] != 5 {
-			t.Fatalf("lane %s has %d blocks in the window of 10, expected 5", l.Lane, l.BlocksInWindow[0])
+		if l.BlocksInWindow[0] != LaneWindows[0]/2 {
+			t.Fatalf("lane %s has %d blocks in the window of %d, expected %d",
+				l.Lane, l.BlocksInWindow[0], LaneWindows[0], LaneWindows[0]/2)
 		}
 	}
 	// The sum across the lanes must not exceed the window size — otherwise a block is counted twice.
@@ -127,7 +129,7 @@ func TestLaneStatsCountsRun(t *testing.T) {
 }
 
 // The average spacing has to say whether a lane is keeping up with its target. With two lanes
-// alternating at a network spacing of 120 s, one lane's spacing is 240 s — exactly LaneBlockTime.
+// alternating at the network's spacing, one lane's spacing is twice that — exactly LaneBlockTime.
 func TestLaneStatsSpacingMatchesTarget(t *testing.T) {
 	lanes := make([]mh.Lane, 0, 40)
 	for i := range 40 {
@@ -137,7 +139,7 @@ func TestLaneStatsSpacingMatchesTarget(t *testing.T) {
 			lanes = append(lanes, mh.LaneG)
 		}
 	}
-	st := buildLanes(t, lanes, 120).LaneStats()
+	st := buildLanes(t, lanes, netSecs).LaneStats()
 
 	want := LaneBlockTime.Seconds()
 	for _, l := range st.Lanes {
@@ -158,7 +160,7 @@ func TestLaneStatsIgnoresGenesisTimestamp(t *testing.T) {
 	g := RegtestGenesis()
 	hc := NewHeaderChain(RegTest, g, nil)
 
-	// The first block appears a year after the genesis, the rest every 120 s as on a live network.
+	// The first block appears a year after the genesis, the rest a block time apart as on a live network.
 	const yearSec = 365 * 24 * 3600
 	prev := g.ID()
 	tm := g.Time + yearSec
@@ -179,14 +181,14 @@ func TestLaneStatsIgnoresGenesisTimestamp(t *testing.T) {
 			t.Fatalf("block %d: %v", i+1, err)
 		}
 		prev = h.ID()
-		tm += 120
+		tm += netSecs
 	}
 
 	st := hc.LaneStats()
 	want := LaneBlockTime.Seconds()
 	for _, l := range st.Lanes {
 		if l.BlocksInWindow[0] == 0 {
-			t.Fatalf("lane %s has not a single block in the window of 10", l.Lane)
+			t.Fatalf("lane %s has not a single block in the window of %d", l.Lane, LaneWindows[0])
 		}
 		if l.AvgSpacingSec < want*0.9 || l.AvgSpacingSec > want*1.1 {
 			t.Fatalf("lane %s has a spacing of %.0f s, the target is %.0f s — the genesis time got into the average",

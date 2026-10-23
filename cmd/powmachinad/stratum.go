@@ -19,8 +19,13 @@ func (n *Node) WorkTemplate(lane mh.Lane) (*work.Template, error) {
 	if err != nil {
 		return nil, err
 	}
+	payouts := make([]work.Payout, len(t.Payouts))
+	for i, p := range t.Payouts {
+		payouts[i] = work.Payout{Value: p.Value, Script: p.Script}
+	}
 	return &work.Template{Height: t.Height, Lane: t.Lane, Bits: t.Bits, PrevBlock: t.PrevBlock,
-		MinTime: t.MinTime, Version: t.Version, Fees: t.Fees, Txs: t.Txs}, nil
+		MinTime: t.MinTime, Version: t.Version, Fees: t.Fees, Txs: t.Txs, FinalityKey: t.FinalityKey,
+		Settlement: t.Settlement, Payouts: payouts, CreditRoot: t.CreditRoot, TakesShares: t.TakesShares}, nil
 }
 
 // TipID implements stratum.Backend.

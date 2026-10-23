@@ -22,6 +22,9 @@ type fakeNode struct {
 	tip    [32]byte
 	height uint64
 	got    []*chain.Block
+	// hash, when set, makes the node take shares: it hashes them as powmachinad does.
+	hash   func(*chain.Header) ([32]byte, error)
+	shares []*chain.Share
 }
 
 func (f *fakeNode) Template(lane string) (*nodeclient.Template, error) {
@@ -32,7 +35,28 @@ func (f *fakeNode) Template(lane string) (*nodeclient.Template, error) {
 	}
 	return &nodeclient.Template{Height: f.height + 1, Lane: "C",
 		Bits: fmt.Sprintf("%08x", chain.RegtestTargetBits), PrevBlock: hex.EncodeToString(f.tip[:]),
-		MinTime: 1_700_000_001}, nil
+		MinTime: 1_700_000_001, CreditRoot: strings.Repeat("00", 32), TakesShares: f.hash != nil}, nil
+}
+
+func (f *fakeNode) SubmitShare(s *chain.Share) (bool, error) {
+	if f.hash == nil {
+		return false, fmt.Errorf("%w: the node holds no full DAG", nodeclient.ErrRPC)
+	}
+	if s.Header.MerkleRoot != chain.ShareRoot(s.BodyRoot, &s.Commit) {
+		return false, fmt.Errorf("%w: the root", nodeclient.ErrRPC)
+	}
+	hash, err := f.hash(&s.Header)
+	if err != nil {
+		return false, err
+	}
+	if ok, err := chain.MeetsShareTarget(hash, s.Header.Bits, s.Commit.Weight); err != nil || !ok {
+		return false, fmt.Errorf("%w: below the share target", nodeclient.ErrRPC)
+	}
+	f.mu.Lock()
+	f.shares = append(f.shares, s)
+	f.mu.Unlock()
+	target, _ := chain.CompactToTarget(s.Header.Bits)
+	return mh.MeetsTarget(&hash, &target), nil
 }
 
 func (f *fakeNode) SubmitBlock(b *chain.Block) error {
@@ -100,22 +124,99 @@ func TestMinerFindsValidBlocks(t *testing.T) {
 		if b.Header.Lane != mh.LaneC || uint64(b.Header.Height) != uint64(i+1) {
 			t.Fatalf("the block %d: lane %v height %d", i, b.Header.Lane, b.Header.Height)
 		}
-		if chain.TxMerkleRoot(b.Txs) != b.Header.MerkleRoot {
+		if b.CheckRoot() != nil {
 			t.Fatalf("the block %d: the merkle root does not match", i)
 		}
-		cb := b.Txs[0]
-		paid := false
-		for _, o := range cb.Outputs {
-			if string(o.Script) == string(payout) && o.Value == chain.MinerSubsidy(uint64(b.Header.Height)) {
-				paid = true
-			}
-		}
-		if !paid {
-			t.Fatalf("the block %d: the coinbase does not pay the miner its reward", i)
+		// The miner is paid through the credits of the block's share, not by the coinbase.
+		if string(b.Share.Payout[:]) != string(payout) || b.Share.Weight != chain.MaxShareWeight {
+			t.Fatalf("the block %d: the share credits %x with weight %d", i, b.Share.Payout[:4], b.Share.Weight)
 		}
 	}
 	if m.Blocks.Load() < 2 || m.Rejected.Load() != 0 {
 		t.Fatalf("%d accepted, %d rejected", m.Accepted.Load(), m.Rejected.Load())
+	}
+}
+
+// A miner whose node takes shares sends every share it finds, and the ones that are blocks as blocks
+// too; the weight follows the hashrate it measured.
+func TestMinerPublishesShares(t *testing.T) {
+	rx, err := mh.NewRandomX(0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rx.Close()
+	h, err := mh.NewHasherWithRandomX(rx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	v := mh.NewVerifier(0, mh.TestProfile)
+	var hashMu sync.Mutex
+	node := &fakeNode{tip: chain.RegtestGenesis().ID(), hash: func(hdr *chain.Header) ([32]byte, error) {
+		hashMu.Lock()
+		defer hashMu.Unlock()
+		in := hdr.PoWInput()
+		return h.Hash(v, &in, hdr.Nonce, hdr.Lane)
+	}}
+	payout := make([]byte, 32)
+	payout[0] = 9
+	lg := log.New(io.Discard, "", 0)
+	m := New(Options{Params: chain.RegTest, Threads: 2, Light: true, Log: lg})
+	feed := &NodeFeed{Src: node, Payout: payout, Params: chain.RegTest, Poll: 20 * time.Millisecond, Log: lg}
+	quit := make(chan struct{})
+	done := make(chan error, 1)
+	go func() { done <- m.Run(feed, quit) }()
+	// On regtest most shares of weight 11 are blocks too (its share target is ~1.5× the block's),
+	// so the test waits for one that is not.
+	deadline := time.Now().Add(2 * time.Minute)
+	for {
+		node.mu.Lock()
+		blocks, shares := len(node.got), len(node.shares)
+		node.mu.Unlock()
+		if blocks >= 2 && shares > blocks {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d blocks and %d shares in 2 minutes", blocks, shares)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	close(quit)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	node.mu.Lock()
+	defer node.mu.Unlock()
+	sent := map[[32]byte]bool{}
+	for _, s := range node.shares {
+		if string(s.Commit.Payout[:]) != string(payout) {
+			t.Fatalf("a share pays %x", s.Commit.Payout[:4])
+		}
+		sent[s.ID()] = true
+	}
+	for i, b := range node.got {
+		if !sent[b.Header.ID()] {
+			t.Fatalf("block %d did not go out as a share first", i)
+		}
+	}
+}
+
+// The weight keeps a lane at shareRate at most, and an unknown hashrate gets the heaviest.
+func TestShareWeightFollowsTheHashrate(t *testing.T) {
+	bits := uint32(0x1d00ffff) // 2^32 hashes a block
+	if w := shareWeight(0, bits); w != chain.MaxShareWeight {
+		t.Fatalf("an unknown rate: weight %d", w)
+	}
+	// 2^32 / 3000 hashes a share of weight 0: at that many a second, one share a second.
+	perShare := float64(uint64(1)<<32) / chain.SharesPerLaneBlock
+	if w := shareWeight(perShare/4, bits); w != 0 {
+		t.Fatalf("a quarter share a second: weight %d, want 0", w)
+	}
+	if w := shareWeight(perShare*8, bits); w != 4 {
+		t.Fatalf("eight shares a second: weight %d, want 4 (half a share a second)", w)
+	}
+	if w := shareWeight(perShare*1e9, bits); w != chain.MaxShareWeight {
+		t.Fatalf("a farm: weight %d, want the cap", w)
 	}
 }
 

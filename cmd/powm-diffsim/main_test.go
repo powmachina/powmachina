@@ -27,7 +27,7 @@ func TestLwmaIsTheChainsRetarget(t *testing.T) {
 		return f
 	}
 	if lwmaN != chain.LwmaWindow || laneSpacing != chain.LaneBlockTime.Seconds() ||
-		relief != int(chain.LaneRotationRelief.Seconds()) || mtpSpan != chain.MedianTimeSpan {
+		relief != int64(chain.LaneRotationRelief.Seconds()) || mtpSpan != chain.MedianTimeSpan {
 		t.Fatal("the simulator's constants are not the chain's")
 	}
 

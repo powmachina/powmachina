@@ -18,12 +18,19 @@ import (
 // merkle root, so the header now commits to the witnesses too, and the header itself keeps its
 // 89 bytes. A body whose witnesses do not hash to the commitment is not the block the miner
 // made, and that can be said on arrival, before anything is stored or validated.
+//
+// The same output carries the credit root (credits.go): "PMwc" ‖ witness root ‖ "PMcr" ‖ the root
+// of the credit state the block builds on, 72 bytes and nothing else.
 
 const (
 	// witnessCommitmentTag opens the commitment output's script; the root follows.
 	witnessCommitmentTag = "PMwc"
-	// WitnessCommitmentBytes is the length of that script.
+	// WitnessCommitmentBytes is the length of the witness part.
 	WitnessCommitmentBytes = len(witnessCommitmentTag) + 32
+	// creditCommitmentTag follows the witness root; the credit root follows it.
+	creditCommitmentTag = "PMcr"
+	// CoinbaseCommitmentBytes is the length of the whole commitment script.
+	CoinbaseCommitmentBytes = WitnessCommitmentBytes + len(creditCommitmentTag) + 32
 )
 
 var (
@@ -35,24 +42,35 @@ var (
 	ErrBadWitnessCommitment = errors.New("chain: the witnesses do not match the commitment in the coinbase")
 )
 
-func witnessCommitmentScript(root [32]byte) []byte {
-	return append([]byte(witnessCommitmentTag), root[:]...)
+func coinbaseCommitmentScript(witnessRoot, creditRoot [32]byte) []byte {
+	s := make([]byte, 0, CoinbaseCommitmentBytes)
+	s = append(s, witnessCommitmentTag...)
+	s = append(s, witnessRoot[:]...)
+	s = append(s, creditCommitmentTag...)
+	return append(s, creditRoot[:]...)
 }
 
-// witnessCommitment reads the root the coinbase commits to.
-func (b *Block) witnessCommitment() ([32]byte, error) {
-	var root [32]byte
+// coinbaseCommitment reads the two roots the coinbase commits to.
+func (b *Block) coinbaseCommitment() (witnessRoot, creditRoot [32]byte, err error) {
 	if len(b.Txs) == 0 || b.Txs[0] == nil || len(b.Txs[0].Outputs) == 0 {
-		return root, ErrNoWitnessCommitment
+		return witnessRoot, creditRoot, ErrNoWitnessCommitment
 	}
 	outs := b.Txs[0].Outputs
 	last := outs[len(outs)-1]
-	if last.ScriptVersion != ScriptVersionData || len(last.Script) != WitnessCommitmentBytes ||
-		string(last.Script[:len(witnessCommitmentTag)]) != witnessCommitmentTag {
-		return root, ErrNoWitnessCommitment
+	if last.ScriptVersion != ScriptVersionData || len(last.Script) != CoinbaseCommitmentBytes ||
+		string(last.Script[:len(witnessCommitmentTag)]) != witnessCommitmentTag ||
+		string(last.Script[WitnessCommitmentBytes:WitnessCommitmentBytes+len(creditCommitmentTag)]) != creditCommitmentTag {
+		return witnessRoot, creditRoot, ErrNoWitnessCommitment
 	}
-	copy(root[:], last.Script[len(witnessCommitmentTag):])
-	return root, nil
+	copy(witnessRoot[:], last.Script[len(witnessCommitmentTag):WitnessCommitmentBytes])
+	copy(creditRoot[:], last.Script[CoinbaseCommitmentBytes-32:])
+	return witnessRoot, creditRoot, nil
+}
+
+// witnessCommitment reads the witness root the coinbase commits to.
+func (b *Block) witnessCommitment() ([32]byte, error) {
+	root, _, err := b.coinbaseCommitment()
+	return root, err
 }
 
 // checkWitnessesAgainst verifies the witnesses of this body against a commitment.

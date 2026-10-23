@@ -25,7 +25,7 @@ func TestApplyUndoRestoresExactState(t *testing.T) {
 		t.Fatal(err)
 	}
 	spend.Witness = []Witness{{Items: [][]byte{sig}}}
-	b := blockWith(h, []*Tx{coinbaseTx(h, MinerSubsidy(h), p), spend})
+	b := blockWith(h, []*Tx{coinbaseTx(h, 0, p), spend})
 	if err := b.ValidateBlock(u, p); err != nil {
 		t.Fatal(err)
 	}
@@ -37,11 +37,17 @@ func TestApplyUndoRestoresExactState(t *testing.T) {
 	if _, ok := u.Get(prev); ok {
 		t.Fatal("a spent output has to disappear from the UTXO set")
 	}
-	if u.Len() != 4 { // 2 from the coinbase (the dev fee + the miner) + 2 new ones
-		t.Fatalf("after the block I expect 4 outputs, I have %d", u.Len())
+	if u.Len() != 3 { // the dev fee + 2 new ones; the miner is paid in credits
+		t.Fatalf("after the block I expect 3 outputs, I have %d", u.Len())
+	}
+	if u.Pot() == 0 {
+		t.Fatal("the block put nothing into the pot")
 	}
 
 	u.Undo(undo)
+	if u.Pot() != 0 || u.CreditsRoot() != CreditsRoot(0, nil) {
+		t.Fatal("the undo did not restore the credit state")
+	}
 	if !reflect.DeepEqual(u.Snapshot(), before) {
 		t.Fatal("Undo did not restore exactly the original state")
 	}
@@ -52,9 +58,7 @@ func TestDataOutputsStayOutOfUTXO(t *testing.T) {
 	p := RegTest
 	u := NewUTXOSet()
 	h := uint64(10)
-	cb := coinbaseTx(h, MinerSubsidy(h), p)
-	cb.Outputs = append(cb.Outputs, TxOut{Value: 0, ScriptVersion: ScriptVersionData,
-		Script: []byte("an anchor to something")})
+	cb := coinbaseTx(h, 0, p) // the dev fee, and the commitment as its data output
 	b := blockWith(h, []*Tx{cb})
 	if err := b.ValidateBlock(u, p); err != nil {
 		t.Fatal(err)
@@ -62,8 +66,8 @@ func TestDataOutputsStayOutOfUTXO(t *testing.T) {
 	if _, err := u.Apply(b); err != nil {
 		t.Fatal(err)
 	}
-	if u.Len() != 2 {
-		t.Fatalf("the data output should not have been stored; I expect 2 outputs, I have %d", u.Len())
+	if u.Len() != 1 {
+		t.Fatalf("the data output should not have been stored; I expect 1 output, I have %d", u.Len())
 	}
 }
 
@@ -136,7 +140,7 @@ func FuzzDeserializeTx(f *testing.F) {
 
 func FuzzDeserializeBlock(f *testing.F) {
 	p := RegTest
-	b := blockWith(10, []*Tx{coinbaseTx(10, MinerSubsidy(10), p)})
+	b := blockWith(10, []*Tx{coinbaseTx(10, 0, p)})
 	f.Add(b.Serialize())
 	f.Add([]byte{})
 

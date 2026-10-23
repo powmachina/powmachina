@@ -27,6 +27,7 @@ type fakeNode struct {
 	blocks []*chain.Block
 	v      *mh.Verifier
 	h      *mh.Hasher
+	shares []*chain.Share
 }
 
 func newFakeNode(t *testing.T) *fakeNode {
@@ -51,7 +52,7 @@ func (f *fakeNode) WorkTemplate(lane mh.Lane) (*work.Template, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return &work.Template{Height: f.height + 1, Lane: lane.String(), Bits: fmt.Sprintf("%08x", chain.RegtestTargetBits),
-		PrevBlock: hex.EncodeToString(f.tip[:]), MinTime: 1_700_000_001}, nil
+		PrevBlock: hex.EncodeToString(f.tip[:]), MinTime: 1_700_000_001, CreditRoot: strings.Repeat("00", 32)}, nil
 }
 func (f *fakeNode) PoWHash(h *chain.Header) ([32]byte, error) {
 	f.mu.Lock()
@@ -68,6 +69,37 @@ func (f *fakeNode) SubmitBlock(b *chain.Block) error {
 	f.blocks = append(f.blocks, b)
 	f.tip, f.height = b.Header.ID(), uint64(b.Header.Height)
 	return nil
+}
+
+func (f *fakeNode) SubmitShare(s *chain.Share) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.shares = append(f.shares, s)
+	return false, nil
+}
+
+// A device's job carries the heaviest Sharepool weight its stratum target still meets: every share
+// it sends is a Sharepool share, worth as much as it can be.
+func TestDeviceWeightFollowsItsTarget(t *testing.T) {
+	bits := uint32(0x1d00ffff)
+	tpl := &work.Template{Bits: fmt.Sprintf("%08x", bits)}
+	for w := uint8(0); w <= chain.MaxShareWeight; w++ {
+		st, _ := chain.ShareTarget(bits, w)
+		if got := deviceWeight(tpl, st); got != w {
+			t.Fatalf("a device exactly at the target of weight %d got weight %d", w, got)
+		}
+	}
+	block, _ := chain.CompactToTarget(bits)
+	if got := deviceWeight(tpl, block); got != chain.MaxShareWeight {
+		t.Fatalf("a device at the block's target got weight %d", got)
+	}
+	var easiest [32]byte
+	for i := range easiest {
+		easiest[i] = 0xff
+	}
+	if got := deviceWeight(tpl, easiest); got != 0 {
+		t.Fatalf("a device on an easier target than any share got weight %d", got)
+	}
 }
 
 func startServer(t *testing.T, f *fakeNode, opt ServerOptions) (*Server, string) {
@@ -194,16 +226,10 @@ func TestSubmitFlowAndRejections(t *testing.T) {
 	if len(f.blocks) != 1 {
 		t.Fatal("the block did not reach the node")
 	}
-	// the coinbase pays the address from the login
+	// the block's share is credited to the address from the login
 	_, prog, _ := address.Decode(chain.RegTest.Bech32HRP, testAddr(9))
-	paid := false
-	for _, o := range f.blocks[0].Txs[0].Outputs {
-		if string(o.Script) == string(prog) {
-			paid = true
-		}
-	}
-	if !paid {
-		t.Fatal("the coinbase does not pay the address from the login")
+	if string(f.blocks[0].Share.Payout[:]) != string(prog) {
+		t.Fatal("the block's share does not credit the address from the login")
 	}
 	r.send(4, "submit", SubmitParams{JobID: job.ID, Nonce: FormatNonce(good)})
 	if m := r.resp(t); !strings.Contains(string(m["error"]), fmt.Sprint(ErrCodeDuplicate)) {

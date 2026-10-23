@@ -44,6 +44,12 @@ type CoinScanner interface {
 	ForEachCoin(fn func(Outpoint, Coin) error) error
 }
 
+// StateView is the state a block is validated against: the coins and the credits its parent left.
+type StateView interface {
+	CoinView
+	CreditView
+}
+
 // CoinBatch is a change to the UTXO set that is committed at once. A read has to see the writes
 // from the same batch too — a transaction may spend an output of a previous one in the same block.
 type CoinBatch interface {
@@ -52,14 +58,60 @@ type CoinBatch interface {
 	Spend(op Outpoint)
 }
 
-// UTXOSet is safe for concurrent use.
+// StateBatch is a change to the whole state — coins and credits — committed at once. Its reads
+// see its own writes.
+type StateBatch interface {
+	CoinBatch
+	CreditView
+	// PutCredit writes an entry, nil deletes it.
+	PutCredit(payout [32]byte, c *Credit)
+	// PutPot writes the pot and the root of the credit state it belongs to.
+	PutPot(pot int64, root [32]byte)
+}
+
+// UTXOSet is the whole state in memory — the coins and the credits — safe for concurrent use.
 type UTXOSet struct {
-	mu    sync.RWMutex
-	coins map[Outpoint]Coin
+	mu      sync.RWMutex
+	coins   map[Outpoint]Coin
+	credits map[[32]byte]Credit
+	pot     int64
+	root    [32]byte
 }
 
 func NewUTXOSet() *UTXOSet {
-	return &UTXOSet{coins: make(map[Outpoint]Coin)}
+	return &UTXOSet{coins: make(map[Outpoint]Coin), credits: make(map[[32]byte]Credit),
+		root: CreditsRoot(0, nil)}
+}
+
+func (u *UTXOSet) Pot() int64 {
+	u.mu.RLock()
+	defer u.mu.RUnlock()
+	return u.pot
+}
+
+func (u *UTXOSet) CreditsRoot() [32]byte {
+	u.mu.RLock()
+	defer u.mu.RUnlock()
+	return u.root
+}
+
+func (u *UTXOSet) ForEachCredit(fn func([32]byte, Credit) error) error {
+	u.mu.RLock()
+	defer u.mu.RUnlock()
+	for p, c := range u.credits {
+		if err := fn(p, c); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Credit reads one key's entry.
+func (u *UTXOSet) Credit(payout [32]byte) (Credit, bool) {
+	u.mu.RLock()
+	defer u.mu.RUnlock()
+	c, ok := u.credits[payout]
+	return c, ok
 }
 
 func (u *UTXOSet) Get(op Outpoint) (Coin, bool) {
@@ -86,6 +138,11 @@ type BlockUndo struct {
 	Height  uint64
 	Spent   []UndoEntry
 	Created []Outpoint
+	// Credits are the entries the block changed as they were before it, nil for one it created.
+	Credits map[[32]byte]*Credit
+	// Pot and CreditsRoot are the pot and the credit root before the block.
+	Pot         int64
+	CreditsRoot [32]byte
 }
 
 // Apply writes a block's changes into the UTXO set. It assumes the block has already passed
@@ -93,7 +150,7 @@ type BlockUndo struct {
 func (u *UTXOSet) Apply(b *Block) (*BlockUndo, error) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	batch := mapBatch{u.coins}
+	batch := mapBatch{u}
 	undo, err := ApplyBlockTo(b, batch)
 	if err != nil {
 		u.rollbackLocked(undo)
@@ -102,13 +159,31 @@ func (u *UTXOSet) Apply(b *Block) (*BlockUndo, error) {
 	return undo, nil
 }
 
-// mapBatch is a CoinBatch over an in-memory map. Writes go straight into it, so "committing" is a
-// no-op and rolling changes back is done by rollbackLocked.
-type mapBatch struct{ coins map[Outpoint]Coin }
+// mapBatch is a StateBatch over the in-memory set, under its lock. Writes go straight into it, so
+// "committing" is a no-op and rolling changes back is done by rollbackLocked.
+type mapBatch struct{ u *UTXOSet }
 
-func (m mapBatch) Get(op Outpoint) (Coin, bool) { c, ok := m.coins[op]; return c, ok }
-func (m mapBatch) Add(op Outpoint, c Coin)      { m.coins[op] = c }
-func (m mapBatch) Spend(op Outpoint)            { delete(m.coins, op) }
+func (m mapBatch) Get(op Outpoint) (Coin, bool) { c, ok := m.u.coins[op]; return c, ok }
+func (m mapBatch) Add(op Outpoint, c Coin)      { m.u.coins[op] = c }
+func (m mapBatch) Spend(op Outpoint)            { delete(m.u.coins, op) }
+func (m mapBatch) Pot() int64                   { return m.u.pot }
+func (m mapBatch) CreditsRoot() [32]byte        { return m.u.root }
+func (m mapBatch) ForEachCredit(fn func([32]byte, Credit) error) error {
+	for p, c := range m.u.credits {
+		if err := fn(p, c); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+func (m mapBatch) PutCredit(p [32]byte, c *Credit) {
+	if c == nil {
+		delete(m.u.credits, p)
+	} else {
+		m.u.credits[p] = *c
+	}
+}
+func (m mapBatch) PutPot(pot int64, root [32]byte) { m.u.pot, m.u.root = pot, root }
 
 // ApplyBlockTo is the **only implementation** of what a block does to the UTXO set. Both the
 // in-memory set and persistent storage use it through CoinBatch — two implementations of this
@@ -116,9 +191,10 @@ func (m mapBatch) Spend(op Outpoint)            { delete(m.coins, op) }
 //
 // It assumes the block has already passed validation. On an error it returns the undo filled up to
 // the point of failure, so whatever was already written can be rolled back.
-func ApplyBlockTo(b *Block, batch CoinBatch) (*BlockUndo, error) {
+func ApplyBlockTo(b *Block, batch StateBatch) (*BlockUndo, error) {
 	height := uint64(b.Header.Height)
-	undo := &BlockUndo{Height: height}
+	undo := &BlockUndo{Height: height, Pot: batch.Pot(), CreditsRoot: batch.CreditsRoot()}
+	var fees int64
 
 	for _, tx := range b.Txs {
 		if !tx.IsCoinbase() {
@@ -130,6 +206,10 @@ func ApplyBlockTo(b *Block, batch CoinBatch) (*BlockUndo, error) {
 				}
 				undo.Spent = append(undo.Spent, UndoEntry{Outpoint: op, Coin: coin})
 				batch.Spend(op)
+				fees += coin.Value
+			}
+			for _, out := range tx.Outputs {
+				fees -= out.Value
 			}
 		}
 		txid := tx.TxID()
@@ -148,6 +228,18 @@ func ApplyBlockTo(b *Block, batch CoinBatch) (*BlockUndo, error) {
 			undo.Created = append(undo.Created, op)
 		}
 	}
+	if height == 0 {
+		return undo, nil // the genesis settles nothing: the credit state starts empty
+	}
+	step, err := CreditStep(height, &b.Share, &b.Settlement, fees, batch)
+	if err != nil {
+		return undo, err
+	}
+	undo.Credits = step.Before
+	for p, c := range step.Changed {
+		batch.PutCredit(p, c)
+	}
+	batch.PutPot(step.Pot, step.Root)
 	return undo, nil
 }
 
@@ -165,6 +257,10 @@ func (u *UTXOSet) rollbackLocked(undo *BlockUndo) {
 	for _, e := range undo.Spent {
 		u.coins[e.Outpoint] = e.Coin
 	}
+	for p, c := range undo.Credits {
+		mapBatch{u}.PutCredit(p, c)
+	}
+	u.pot, u.root = undo.Pot, undo.CreditsRoot
 }
 
 // AddCoin is a helper for setting up an initial state (tests, the genesis).
