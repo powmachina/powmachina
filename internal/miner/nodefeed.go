@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log"
 	"math/big"
+	"strings"
 	"sync"
 	"time"
 
@@ -128,6 +129,11 @@ func (f *NodeFeed) Run(lanes []mh.Lane, set func(mh.Lane, *work.Job), quit <-cha
 			f.mu.Lock()
 			blocked := f.logged[l]
 			f.mu.Unlock()
+			if jerr != nil && s.have && tipNotApplied(jerr) {
+				// The node has the new tip's header, not yet its body: the job on the block below
+				// goes on until there is one on the new tip (s.tip stays, so the next poll asks again).
+				continue
+			}
 			if jerr != nil {
 				if !blocked {
 					f.Log.Printf("lane %s: no work: %v — waiting", l, jerr)
@@ -158,6 +164,12 @@ func (f *NodeFeed) Run(lanes []mh.Lane, set func(mh.Lane, *work.Job), quit <-cha
 		case <-poll.C:
 		}
 	}
+}
+
+// tipNotApplied: the node's answer that its new tip has no body applied yet. Over RPC it comes as
+// the node's text.
+func tipNotApplied(err error) bool {
+	return errors.Is(err, work.ErrTipNotApplied) || strings.Contains(err.Error(), work.ErrTipNotApplied.Error())
 }
 
 func (f *NodeFeed) job(l mh.Lane) (*work.Job, error) {

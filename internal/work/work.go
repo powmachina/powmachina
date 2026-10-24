@@ -103,6 +103,11 @@ type Job struct {
 // ErrChainAhead: the chain's time is ahead of the clock by more than the node allows — it would refuse the block.
 var ErrChainAhead = errors.New("chain time is ahead of the clock — waiting")
 
+// ErrTipNotApplied: the node has the new tip's header but not yet its body applied, so it has no
+// work on that tip for a few moments. Whoever has a job on the block below keeps mining it —
+// that is the last block the node verified — and takes a new one once the tip is applied.
+var ErrTipNotApplied = errors.New("the state is not at the tip yet — no work until the tip is applied")
+
 // Build assembles a job from a template: the coinbase to `payout` with a random extranonce (two jobs with
 // the same address never hash the same thing), the transactions from the template, the share
 // commitment, the merkle root, the header. The job looks for a block, the share of the heaviest

@@ -12,6 +12,7 @@ import (
 	"powmachina/internal/p2p"
 	"powmachina/internal/rpc"
 	"powmachina/internal/store"
+	"powmachina/internal/work"
 )
 
 // Node implements rpc.Backend — RPC has no view of the state of its own, it only exposes the node's.
@@ -182,6 +183,11 @@ func (n *Node) template(lane mh.Lane, sharesOnly bool) (*rpc.Template, error) {
 	}
 
 	tip, height, tipID := n.chain.Tip()
+	// Everything below — the credit payouts, the settlement's branch — reads the applied state,
+	// so the header tip without its body yet has no work.
+	if st, err := n.store.Tip(); err != nil || st.ID != tipID {
+		return nil, work.ErrTipNotApplied
+	}
 	bits, err := n.chain.NextBitsFor(lane)
 	if err != nil {
 		return nil, err
@@ -231,10 +237,7 @@ func (n *Node) template(lane mh.Lane, sharesOnly bool) (*rpc.Template, error) {
 	if t.Shares = len(settlement.Shares); t.Shares > 0 {
 		t.Settlement = fmt.Sprintf("%x", settlement.Serialize())
 	}
-	// The coinbase pays what the credit state of the tip owes; that state has to be the tip's.
-	if st, err := n.store.Tip(); err != nil || st.ID != tipID {
-		return nil, errors.New("the state is not at the tip yet — no work until the tip is applied")
-	}
+	// The coinbase pays what the credit state of the tip owes (checked above to be the tip's).
 	payouts, err := chain.CreditPayouts(next, n.store)
 	if err != nil {
 		return nil, err

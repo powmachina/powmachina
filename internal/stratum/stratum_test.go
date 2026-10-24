@@ -34,6 +34,8 @@ type fakeNode struct {
 	atts    []chain.Attestation
 	// takesShares / noBlock go into the templates (a full-DAG node; a lane the rotation blocks).
 	takesShares, noBlock bool
+	// notApplied: the node has a new tip's header and not yet its body (work.ErrTipNotApplied).
+	notApplied bool
 }
 
 type dueAttest struct {
@@ -62,6 +64,9 @@ func (f *fakeNode) TipID() [32]byte {
 func (f *fakeNode) WorkTemplate(lane mh.Lane) (*work.Template, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.notApplied {
+		return nil, work.ErrTipNotApplied
+	}
 	return &work.Template{Height: f.height + 1, Lane: lane.String(), Bits: fmt.Sprintf("%08x", chain.RegtestTargetBits),
 		PrevBlock: hex.EncodeToString(f.tip[:]), MinTime: 1_700_000_001, CreditRoot: strings.Repeat("00", 32),
 		FinalityKey: f.nodeKey, TakesShares: f.takesShares, NoBlock: f.noBlock}, nil

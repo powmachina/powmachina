@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"sync"
 	"testing"
 	"time"
 
 	"powmachina/internal/chain"
+	"powmachina/internal/mh"
 	"powmachina/internal/nodeclient"
 	"powmachina/internal/work"
 )
@@ -131,5 +133,74 @@ func TestBlockTheNodeRefusedIsNotSentAgain(t *testing.T) {
 	}
 	if n.calls != 1 {
 		t.Fatalf("the node was asked %d times", n.calls)
+	}
+}
+
+// headerAheadNode has a new tip whose body has not been applied: it says so instead of a template.
+type headerAheadNode struct {
+	fakeNode
+	ahead bool
+}
+
+func (n *headerAheadNode) Template(lane string) (*nodeclient.Template, error) {
+	n.mu.Lock()
+	ahead := n.ahead
+	n.mu.Unlock()
+	if ahead {
+		return nil, fmt.Errorf("%w: %v", nodeclient.ErrRPC, work.ErrTipNotApplied)
+	}
+	return n.fakeNode.Template(lane)
+}
+
+// While the new tip's body is on its way, the lane keeps its job instead of going idle.
+func TestTipWithoutItsBodyKeepsTheJob(t *testing.T) {
+	n := &headerAheadNode{}
+	n.tip = chain.RegtestGenesis().ID()
+	f := &NodeFeed{Src: n, Payout: make([]byte, 32), Params: chain.RegTest,
+		Poll: 5 * time.Millisecond, Log: log.New(io.Discard, "", 0)}
+	var mu sync.Mutex
+	var jobs, idle int
+	quit := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f.Run([]mh.Lane{mh.LaneC}, func(_ mh.Lane, j *work.Job) {
+			mu.Lock()
+			defer mu.Unlock()
+			if j == nil {
+				idle++
+			} else {
+				jobs++
+			}
+		}, quit)
+	}()
+	wait := func(cond func() bool) bool {
+		for end := time.Now().Add(2 * time.Second); time.Now().Before(end); time.Sleep(time.Millisecond) {
+			mu.Lock()
+			ok := cond()
+			mu.Unlock()
+			if ok {
+				return true
+			}
+		}
+		return false
+	}
+	if !wait(func() bool { return jobs == 1 }) {
+		t.Fatal("no first job")
+	}
+	n.mu.Lock()
+	n.tip, n.height, n.ahead = [32]byte{1}, 1, true
+	n.mu.Unlock()
+	time.Sleep(50 * time.Millisecond)
+	n.mu.Lock()
+	n.ahead = false
+	n.mu.Unlock()
+	if !wait(func() bool { return jobs == 2 }) {
+		t.Fatal("no job once the tip was applied")
+	}
+	close(quit)
+	<-done
+	if idle != 0 {
+		t.Fatalf("the lane went idle %d times while the tip's body was coming", idle)
 	}
 }

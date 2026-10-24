@@ -159,6 +159,27 @@ func TestBlockedLaneMinesSharesOnly(t *testing.T) {
 	}
 }
 
+// While a new tip's body is on its way the node has no template, and the devices keep mining the
+// job they have instead of being paused until the body is applied.
+func TestTipWithoutItsBodyKeepsTheJob(t *testing.T) {
+	node := &cheapNode{fakeNode: &fakeNode{tip: chain.RegtestGenesis().ID(), takesShares: true},
+		good: map[uint64]bool{7: true}}
+	c, job := loggedIn(t, node)
+	node.mu.Lock()
+	node.notApplied = true
+	node.mu.Unlock()
+	c.pushJobs()
+	c.mu.Lock()
+	paused, jobs := c.lanes[mh.LaneG].paused, len(c.lanes[mh.LaneG].jobs)
+	c.mu.Unlock()
+	if paused || jobs != 1 {
+		t.Fatalf("paused %v with %d jobs; want the job kept", paused, jobs)
+	}
+	if res, e := submitNow(c, job, FormatNonce(7)); e != nil || res.Status != "OK" {
+		t.Fatalf("a share on the kept job: %v", e)
+	}
+}
+
 // The easiest target a device gets is the lightest Sharepool share on a node that takes shares,
 // and the network's floor on one that does not.
 func TestEasiestTargetFollowsTheSharepool(t *testing.T) {

@@ -29,8 +29,13 @@ func (n *Node) WorkTemplate(lane mh.Lane) (*work.Template, error) {
 		NoBlock: t.NoBlock}, nil
 }
 
-// TipID implements stratum.Backend.
+// TipID implements stratum.Backend: the tip the node has applied, which is the one its templates
+// build on. The header tip runs ahead of it until the body comes; new jobs follow when the block
+// is applied (onBlockApplied kicks the server).
 func (n *Node) TipID() [32]byte {
+	if st, err := n.store.Tip(); err == nil {
+		return st.ID
+	}
 	_, _, id := n.chain.Tip()
 	return id
 }

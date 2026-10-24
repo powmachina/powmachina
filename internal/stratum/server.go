@@ -5,7 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-
+	"errors"
 	"fmt"
 	"log"
 	"math/big"
@@ -477,6 +477,12 @@ func (c *sconn) pushJob(id mh.Lane) {
 		j, err = work.BuildShares(t, payout, deviceWeight(t, target), c.s.b.Params())
 	}
 	c.mu.Lock()
+	if errors.Is(err, work.ErrTipNotApplied) && len(st.jobs) > 0 {
+		// The new tip's body is on its way: the device keeps the job on the block below (the last
+		// one the node verified) and gets a new one when the tip is applied.
+		c.mu.Unlock()
+		return
+	}
 	if err != nil {
 		wasPaused := st.paused
 		st.paused = true
