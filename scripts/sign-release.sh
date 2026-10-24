@@ -46,10 +46,12 @@ fi
 [ "$missing" -eq 0 ] || { echo "the list and the release do not match — not signing" >&2; exit 1; }
 
 echo "== signing"
+# The key's password from the environment (POWMACHINA_SIGN_PASSWORD) on stdin, as release.sh does;
+# without it minisign asks on the terminal.
 if command -v minisign >/dev/null; then
-	minisign -S -s "$SIGN_KEY" -m SHA256SUMS -t "PowMachina $VERSION"
+	printf '%s\n' "${POWMACHINA_SIGN_PASSWORD:-}" | minisign -S -s "$SIGN_KEY" -m SHA256SUMS -t "PowMachina $VERSION"
 else
-	docker run --rm -i -v "$(dirname "$SIGN_KEY")":/keys -v "$work":/out \
+	printf '%s\n' "${POWMACHINA_SIGN_PASSWORD:-}" | docker run --rm -i -v "$(dirname "$SIGN_KEY")":/keys -v "$work":/out \
 		jedisct1/minisign -S -s "/keys/$(basename "$SIGN_KEY")" \
 		-m /out/SHA256SUMS -t "PowMachina $VERSION"
 	docker run --rm -v "$work":/out alpine chown "$(id -u):$(id -g)" /out/SHA256SUMS.minisig
