@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"time"
 
 	"powmachina/internal/chain"
 	"powmachina/internal/mh"
@@ -142,14 +143,29 @@ var errLightNode = errors.New("this node verifies no shares — it runs without 
 //
 // Only a node with the full DAG takes shares: a light one would spend 35–100 ms on each, a hundred
 // a second. It neither pools nor relays them, and its templates settle none.
-func (n *Node) acceptShare(s *chain.Share, from string) error {
+// acceptShare takes a share: from is the peer it came from (not relayed back there), origin the
+// address it came in from, for the map of where shares come from (sharegeo.go).
+func (n *Node) acceptShare(s *chain.Share, from, origin string) (err error) {
+	known := false
+	defer func() {
+		if known {
+			n.stats.inc(&n.stats.shares, "known")
+		} else {
+			n.stats.inc(&n.stats.shares, shareResult(err))
+		}
+	}()
 	if !n.epochs.isFull() {
 		return errLightNode
 	}
 	if n.shares.Has(s.ID()) {
+		known = true
 		return nil
 	}
 	hash, err := n.chain.CheckShare(s, epochHasher{n.epochs})
+	if errors.Is(err, chain.ErrUnknownParent) {
+		n.shareOrphans.add(s, from, origin, time.Now())
+		return err
+	}
 	if err != nil {
 		switch {
 		case errors.Is(err, chain.ErrShareRoot), errors.Is(err, chain.ErrShareWeight),
@@ -160,13 +176,16 @@ func (n *Node) acceptShare(s *chain.Share, from string) error {
 		return err
 	}
 	if !n.shares.Add(s, hash) {
+		known = true
 		return nil // the pool is full or another path filed it meanwhile
 	}
+	n.geo.note(origin)
 	n.announceShare(s, from)
 	// A vote for a sibling of the tip can make it the preferred one (the Sharepool spec §4).
 	if n.chain.ReconsiderSibling(s.Header.PrevBlock) {
 		log.Printf("switching to sibling %x: the tip no longer leads it by more than %d share units",
 			s.Header.PrevBlock[:8], chain.SiblingVoteMargin)
+		n.stats.siblingSwitched()
 		return n.ApplyReadyBodies()
 	}
 	return nil
@@ -177,10 +196,35 @@ func (n *Node) SharePool() (bool, map[[32]byte]chain.ShareTally) {
 	return n.epochs.isFull(), n.shares.Tally()
 }
 
+// Credits is the credit state of the applied tip, for getcredits.
+func (n *Node) Credits() (int64, uint64, map[[32]byte]chain.Credit, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	tip, err := n.store.Tip()
+	if err != nil {
+		return 0, 0, nil, err
+	}
+	out := map[[32]byte]chain.Credit{}
+	if err := n.store.ForEachCredit(func(k [32]byte, c chain.Credit) error {
+		out[k] = c
+		return nil
+	}); err != nil {
+		return 0, 0, nil, err
+	}
+	return n.store.Pot(), tip.Height, out, nil
+}
+
 // SubmitShare takes a share from a local miner (RPC submitshare) and says whether it is a block
 // too. The hash comes from the pool, which computed it on the way in.
-func (n *Node) SubmitShare(s *chain.Share) (bool, error) {
-	if err := n.acceptShare(s, ""); err != nil {
+func (n *Node) SubmitShare(s *chain.Share) (bool, error) { return n.submitShare(s, "") }
+
+// SubmitStratumShare implements stratum.Backend: a device's share, with the device's address.
+func (n *Node) SubmitStratumShare(s *chain.Share, ip string) (bool, error) {
+	return n.submitShare(s, ip)
+}
+
+func (n *Node) submitShare(s *chain.Share, origin string) (bool, error) {
+	if err := n.acceptShare(s, "", origin); err != nil {
 		return false, err
 	}
 	hash, err := n.shares.PoWHash(epochHasher{n.epochs}).PoWHash(&s.Header)

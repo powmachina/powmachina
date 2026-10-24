@@ -26,6 +26,8 @@ type fakeBackend struct {
 	finalized bool
 	txs       map[[32]byte]txEntry
 	addr      map[string]addrEntry
+	pot       int64
+	credits   map[[32]byte]chain.Credit
 	rich      []store.RichEntry
 	supply    int64
 	lanes     chain.LaneStats
@@ -124,6 +126,13 @@ func (f *fakeBackend) SubmitBlock(*chain.Block) error         { return errors.Ne
 func (f *fakeBackend) SubmitShare(*chain.Share) (bool, error) { return false, errors.New("no") }
 func (f *fakeBackend) SharePool() (bool, map[[32]byte]chain.ShareTally) {
 	return false, nil
+}
+func (f *fakeBackend) ShareGeo() (bool, int, map[string]int, map[string]uint64, int, uint64) {
+	return true, 30, map[string]int{"DE": 2, "FI": 5}, map[string]uint64{"DE": 9, "FI": 5, "US": 1}, 3, 4
+}
+func (f *fakeBackend) Credits() (int64, uint64, map[[32]byte]chain.Credit, error) {
+	_, h, _ := f.Tip()
+	return f.pot, h, f.credits, nil
 }
 func (f *fakeBackend) TrustedWork() bool               { return true }
 func (f *fakeBackend) ClockSkew() (time.Duration, int) { return 0, 0 }
@@ -915,5 +924,71 @@ func TestGetinfoCarriesSyncState(t *testing.T) {
 	callJSON(t, NewServer(b2, "secret"), "getinfo", nil, &res2)
 	if synced, _ := res2.Result["synced"].(bool); !synced {
 		t.Error("a caught-up node reports itself as not synced")
+	}
+}
+
+// getcredits lists the miners who mine now first, and says what each one's payout needs.
+func TestGetCreditsOrder(t *testing.T) {
+	old, now, rich := [32]byte{1}, [32]byte{2}, [32]byte{3}
+	be := &fakeBackend{height: 900, pot: 7, credits: map[[32]byte]chain.Credit{
+		old:  {Amount: 9_000_000, LastShare: 100},
+		now:  {Amount: 1_000, LastShare: 899, Threshold: 1},
+		rich: {Amount: 4_000_000, LastShare: 899, PaidAt: 850},
+	}}
+	srv := NewServer(be, "secret")
+	var res struct {
+		Result struct {
+			Height  uint64 `json:"height"`
+			Pot     int64  `json:"pot_cogs"`
+			Count   int    `json:"count"`
+			Credits []struct {
+				Amount    int64  `json:"amount_cogs"`
+				Need      int64  `json:"need_cogs"`
+				LastShare uint64 `json:"last_share"`
+				PaidAt    uint64 `json:"paid_at"`
+			} `json:"credits"`
+		} `json:"result"`
+		Error *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	callJSON(t, srv, "getcredits", []any{2}, &res)
+	if res.Error != nil {
+		t.Fatal(res.Error.Message)
+	}
+	r := res.Result
+	if r.Height != 900 || r.Pot != 7 || r.Count != 3 || len(r.Credits) != 2 {
+		t.Fatalf("height %d pot %d count %d rows %d", r.Height, r.Pot, r.Count, len(r.Credits))
+	}
+	if r.Credits[0].Amount != 4_000_000 || r.Credits[0].PaidAt != 850 || r.Credits[1].Amount != 1_000 {
+		t.Fatalf("order: %+v", r.Credits)
+	}
+	if r.Credits[1].Need != chain.PayoutNeed(1) || r.Credits[0].Need != chain.MinPayout {
+		t.Fatalf("need: %+v", r.Credits)
+	}
+}
+
+// getsharegeo: the countries by the window, the most first, with the counts since the start.
+func TestGetShareGeo(t *testing.T) {
+	srv := NewServer(&fakeBackend{height: 1}, "secret")
+	var res struct {
+		Result struct {
+			Enabled   bool `json:"enabled"`
+			Minutes   int  `json:"minutes"`
+			Unknown   int  `json:"unknown"`
+			Countries []struct {
+				Country string `json:"country"`
+				Shares  int    `json:"shares"`
+				Seen    uint64 `json:"seen"`
+			} `json:"countries"`
+		} `json:"result"`
+	}
+	callJSON(t, srv, "getsharegeo", nil, &res)
+	c := res.Result.Countries
+	if !res.Result.Enabled || res.Result.Minutes != 30 || res.Result.Unknown != 3 || len(c) != 3 {
+		t.Fatalf("%+v", res.Result)
+	}
+	if c[0].Country != "FI" || c[1].Country != "DE" || c[1].Seen != 9 || c[2].Country != "US" || c[2].Shares != 0 {
+		t.Fatalf("order: %+v", c)
 	}
 }

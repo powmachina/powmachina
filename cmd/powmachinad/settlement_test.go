@@ -170,3 +170,58 @@ func TestLightNodeTakesNoShares(t *testing.T) {
 		t.Fatalf("a light node refused a block settling a share: %v", err)
 	}
 }
+
+// A share that overtakes its block waits for it, and is taken when the block comes.
+func TestShareBeforeItsBlockWaitsForIt(t *testing.T) {
+	a := NewNode(chain.RegTest, chain.RegtestGenesis(), mh.TestProfile)
+	defer a.Close()
+	b := NewNode(chain.RegTest, chain.RegtestGenesis(), mh.TestProfile)
+	defer b.Close()
+	if err := a.MineBlocks(1); err != nil {
+		t.Fatal(err)
+	}
+	_, _, tipID := a.chain.Tip()
+	blk, err := a.store.Block(tipID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := shareOn(t, a, 7, 77)
+	if err := b.acceptShare(s, "198.51.100.7:17696", "198.51.100.7:17696"); !errors.Is(err, chain.ErrUnknownParent) {
+		t.Fatalf("a share on a block b does not have: %v", err)
+	}
+	if b.shareOrphans.len() != 1 {
+		t.Fatal("the share is not waiting")
+	}
+	if err := b.SubmitBlock(blk); err != nil {
+		t.Fatalf("the block: %v", err)
+	}
+	for deadline := time.Now().Add(10 * time.Second); !b.shares.Has(s.ID()); {
+		if time.Now().After(deadline) {
+			t.Fatal("the share was not taken when its block came")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if b.shareOrphans.len() != 0 {
+		t.Fatal("the share is still waiting")
+	}
+}
+
+// The waiting room is bounded per peer.
+func TestOrphanSharesAreBounded(t *testing.T) {
+	var o shareOrphans
+	now := time.Now()
+	for i := 0; i < maxOrphanSharesPeer+10; i++ {
+		s := &chain.Share{Header: chain.Header{PrevBlock: [32]byte{byte(i), byte(i >> 8)}}}
+		o.add(s, "peer", "peer", now)
+	}
+	if o.len() != maxOrphanSharesPeer {
+		t.Fatalf("%d shares wait from one peer", o.len())
+	}
+	if !o.add(&chain.Share{}, "other", "other", now) {
+		t.Fatal("another peer found no room")
+	}
+	// After a minute the old ones make room.
+	if !o.add(&chain.Share{}, "peer", "peer", now.Add(2*orphanShareTTL)) {
+		t.Fatal("expired shares did not make room")
+	}
+}

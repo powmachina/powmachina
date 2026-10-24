@@ -48,6 +48,7 @@ func (n *Node) SetStratum(s *stratum.Server) {
 	n.mu.Lock()
 	n.stratum = s
 	n.mu.Unlock()
+	n.stratumKick.Store(s)
 }
 
 // StratumInfo implements rpc.Backend.

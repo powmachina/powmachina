@@ -3,6 +3,7 @@ package stratum
 import (
 	"bufio"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"powmachina/internal/finkey"
 	"powmachina/internal/mh"
 	"powmachina/internal/safetext"
 	"powmachina/internal/work"
@@ -24,6 +26,10 @@ type Client struct {
 	Pass  string
 	Agent string
 	Log   *log.Logger
+	// Finality is the miner's own finality key (nil = the server's): the blocks the miner finds carry
+	// it, and the miner signs when the server says the key has a seat (`attest`). The signer never
+	// signs two blocks at one height, whatever the server asks.
+	Finality *finkey.Signer
 
 	mu      sync.Mutex
 	conn    net.Conn
@@ -124,7 +130,11 @@ func (c *Client) session(lanes []mh.Lane, set func(mh.Lane, *work.Job), quit <-c
 	for i, l := range lanes {
 		ls[i] = l.String()
 	}
-	if _, err := c.send("login", LoginParams{Login: c.Login, Pass: c.Pass, Agent: c.Agent, Lanes: ls}); err != nil {
+	lp := LoginParams{Login: c.Login, Pass: c.Pass, Agent: c.Agent, Lanes: ls}
+	if c.Finality != nil {
+		lp.FinalityKey = hex.EncodeToString(c.Finality.Pub[:])
+	}
+	if _, err := c.send("login", lp); err != nil {
 		return err
 	}
 	r := bufio.NewReaderSize(conn, MaxLine)
@@ -185,6 +195,11 @@ func (c *Client) session(lanes []mh.Lane, set func(mh.Lane, *work.Job), quit <-c
 				return err
 			}
 			set(j.Lane, j)
+		case "attest":
+			var p AttestParams
+			if err := json.Unmarshal(msg.Params, &p); err == nil {
+				go c.attest(p)
+			}
 		case "pause":
 			var p PauseParams
 			if err := json.Unmarshal(msg.Params, &p); err == nil {
@@ -226,6 +241,42 @@ func (c *Client) deliver(r *Response) {
 	c.mu.Unlock()
 	if ch != nil {
 		ch <- r
+	}
+}
+
+// attest signs the block the server named and sends the signature back. A server that asks for a
+// second block at a height the key already signed is told nothing: the signer refuses, and the log
+// says so — an honest server never asks for that.
+func (c *Client) attest(p AttestParams) {
+	if c.Finality == nil {
+		return
+	}
+	raw, err := hex.DecodeString(p.Block)
+	if err != nil || len(raw) != 32 {
+		return
+	}
+	var id [32]byte
+	copy(id[:], raw)
+	a, err := c.Finality.Sign(p.Height, id)
+	if err != nil {
+		c.logf("finality: not signing height %d (%x…): %v", p.Height, id[:6], err)
+		return
+	}
+	ch, err := c.send("attestation", AttestationParams{Height: a.Height, Block: p.Block, Signature: hex.EncodeToString(a.Signature)})
+	if err != nil {
+		return
+	}
+	select {
+	case r, ok := <-ch:
+		if !ok {
+			return
+		}
+		if r.Error != nil {
+			c.logf("finality: the server refused the signature of height %d: %s", p.Height, r.Error.Message)
+			return
+		}
+		c.logf("finality: signed height %d (%x…)", p.Height, id[:6])
+	case <-time.After(30 * time.Second):
 	}
 }
 

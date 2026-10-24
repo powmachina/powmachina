@@ -30,8 +30,14 @@ type Backend interface {
 	// PoWHash computes a header's PoW hash (verifying a share).
 	PoWHash(h *chain.Header) ([32]byte, error)
 	SubmitBlock(b *chain.Block) error
-	// SubmitShare passes a device's Sharepool share to the node (the Sharepool spec §2).
-	SubmitShare(s *chain.Share) (bool, error)
+	// SubmitStratumShare passes a device's Sharepool share to the node (the Sharepool spec §2),
+	// with the device's IP address — the node counts the country for the SharePool map.
+	SubmitStratumShare(s *chain.Share, ip string) (bool, error)
+	// AttestDue says which block a finality key should sign now: the block at the finality depth
+	// below the tip, when the key has a seat in its quorum. ok = false: nothing to sign.
+	AttestDue(key [32]byte) (height uint64, block [32]byte, ok bool)
+	// SubmitAttestation takes a miner's signature of a block (verified, filed, relayed).
+	SubmitAttestation(a chain.Attestation) error
 }
 
 // ServerOptions are the server's settings.
@@ -59,6 +65,7 @@ type Server struct {
 	seq      atomic.Uint64
 	closed   chan struct{}
 	closeOne sync.Once
+	kick     chan struct{}
 }
 
 // NewServer creates the server.
@@ -75,7 +82,8 @@ func NewServer(b Backend, opt ServerOptions) *Server {
 	if opt.Log == nil {
 		opt.Log = log.Default()
 	}
-	return &Server{b: b, opt: opt, conns: map[*sconn]bool{}, perIP: map[string]int{}, closed: make(chan struct{})}
+	return &Server{b: b, opt: opt, conns: map[*sconn]bool{}, perIP: map[string]int{}, closed: make(chan struct{}),
+		kick: make(chan struct{}, 1)}
 }
 
 // Serve accepts connections until the listener is closed.
@@ -149,8 +157,17 @@ func (s *Server) all() []*sconn {
 	return out
 }
 
-// watch sends new jobs on a new tip (checked every 500 ms) and every 30 s (new
-// transactions in the mempool).
+// TipChanged tells the server the node has a new tip, so the devices get new jobs now and not at
+// the next check. Every moment a device hashes on the old tip is a block that comes out stale.
+func (s *Server) TipChanged() {
+	select {
+	case s.kick <- struct{}{}:
+	default:
+	}
+}
+
+// watch sends new jobs on a new tip (told by TipChanged, and checked every 500 ms for a backend
+// that does not tell) and every 30 s (new transactions in the mempool).
 func (s *Server) watch() {
 	t := time.NewTicker(500 * time.Millisecond)
 	defer t.Stop()
@@ -160,6 +177,7 @@ func (s *Server) watch() {
 		case <-s.closed:
 			return
 		case <-t.C:
+		case <-s.kick:
 		}
 		tip := s.b.TipID()
 		s.mu.Lock()
@@ -170,6 +188,11 @@ func (s *Server) watch() {
 			last = time.Now()
 			for _, c := range s.all() {
 				c.pushJobs()
+			}
+		}
+		if changed {
+			for _, c := range s.all() {
+				c.askAttest()
 			}
 		}
 	}
@@ -249,6 +272,10 @@ type sconn struct {
 	invalid  int
 	tokens   float64
 	tokensAt time.Time
+	// finKey is the miner's own finality key from the login (nil = the node's key);
+	// asked is the last height the miner was asked to sign.
+	finKey *[32]byte
+	asked  uint64
 }
 
 func newSconn(s *Server, c net.Conn, ip string) *sconn {
@@ -302,6 +329,7 @@ func (c *sconn) serve() {
 			}
 			c.reply(*req.ID, LoginResult{ID: c.sessionID(), Network: c.s.b.Params().Name}, nil)
 			c.pushJobs()
+			c.askAttest()
 			deadline = 10 * time.Minute
 		case "submit":
 			res, e := c.submit(req.Params)
@@ -312,6 +340,13 @@ func (c *sconn) serve() {
 			if bad {
 				c.s.opt.Log.Printf("stratum: %s disconnected — too many invalid shares", c.ip)
 				return
+			}
+		case "attestation":
+			e := c.attestation(req.Params)
+			if e != nil {
+				c.reply(*req.ID, nil, e)
+			} else {
+				c.reply(*req.ID, map[string]string{"status": "OK"}, nil)
 			}
 		case "keepalived":
 			c.reply(*req.ID, map[string]string{"status": "KEEPALIVED"}, nil)
@@ -355,6 +390,15 @@ func (c *sconn) login(raw json.RawMessage) *Error {
 	if len(worker) > 32 {
 		worker = worker[:32]
 	}
+	var finKey *[32]byte
+	if p.FinalityKey != "" {
+		raw, err := hex.DecodeString(p.FinalityKey)
+		if err != nil || len(raw) != 32 {
+			return &Error{ErrCodeInvalid, "finality_key must be 32 bytes hex"}
+		}
+		finKey = new([32]byte)
+		copy(finKey[:], raw)
+	}
 	lanes := map[mh.Lane]*laneState{}
 	for _, l := range p.Lanes {
 		if id, ok := ParseLane(l); ok {
@@ -365,7 +409,7 @@ func (c *sconn) login(raw json.RawMessage) *Error {
 		return &Error{ErrCodeInvalid, `lanes must contain "C" and/or "G"`}
 	}
 	c.mu.Lock()
-	c.loggedIn, c.payout, c.addr, c.worker, c.lanes = true, payout, login, worker, lanes
+	c.loggedIn, c.payout, c.addr, c.worker, c.lanes, c.finKey = true, payout, login, worker, lanes, finKey
 	if len(p.Agent) > 64 {
 		p.Agent = p.Agent[:64]
 	}
@@ -403,6 +447,7 @@ func (c *sconn) pushJob(id mh.Lane) {
 	c.mu.Lock()
 	st := c.lanes[id]
 	payout := c.payout
+	finKey := c.finKey
 	blockN := new(big.Int).SetBytes(block[:])
 	if err == nil {
 		if st.target == nil {
@@ -418,6 +463,13 @@ func (c *sconn) pushJob(id mh.Lane) {
 	c.mu.Unlock()
 	var j *work.Job
 	if err == nil {
+		// The miner's own key replaces the node's in the share commitment — on a network with
+		// finality only (the node's template carries a key then).
+		if finKey != nil && t.FinalityKey != "" {
+			own := *t
+			own.FinalityKey = hex.EncodeToString(finKey[:])
+			t = &own
+		}
 		j, err = work.BuildShares(t, payout, deviceWeight(t, target), c.s.b.Params())
 	}
 	c.mu.Lock()
@@ -440,6 +492,66 @@ func (c *sconn) pushJob(id mh.Lane) {
 	}
 	c.mu.Unlock()
 	c.notify("job", JobParamsFrom(j))
+}
+
+// askAttest asks a miner with its own finality key to sign the block at the finality depth, once
+// per height, when the key has a seat in that block's quorum.
+func (c *sconn) askAttest() {
+	c.mu.Lock()
+	key := c.finKey
+	c.mu.Unlock()
+	if key == nil {
+		return
+	}
+	h, id, ok := c.s.b.AttestDue(*key)
+	if !ok {
+		return
+	}
+	c.mu.Lock()
+	if h <= c.asked {
+		c.mu.Unlock()
+		return
+	}
+	c.asked = h
+	c.mu.Unlock()
+	c.notify("attest", AttestParams{Height: h, Block: hex.EncodeToString(id[:])})
+}
+
+// attestation takes the miner's signature. It has to be by the key the miner logged in with: the
+// stratum port is not a way into the network for anybody's attestations.
+func (c *sconn) attestation(raw json.RawMessage) *Error {
+	var p AttestationParams
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return c.badAttestation("bad attestation params")
+	}
+	c.mu.Lock()
+	key := c.finKey
+	c.mu.Unlock()
+	if key == nil {
+		return c.badAttestation("log in with a finality_key first")
+	}
+	id, err1 := hex.DecodeString(p.Block)
+	sig, err2 := hex.DecodeString(p.Signature)
+	if err1 != nil || err2 != nil || len(id) != 32 || len(sig) != 64 {
+		return c.badAttestation("block must be 32 bytes and signature 64 bytes hex")
+	}
+	a := chain.Attestation{Height: p.Height, Key: *key, Signature: sig}
+	copy(a.BlockID[:], id)
+	if err := a.Verify(); err != nil {
+		return c.badAttestation("the signature does not verify")
+	}
+	if err := c.s.b.SubmitAttestation(a); err != nil {
+		return &Error{ErrCodeInvalid, err.Error()}
+	}
+	return nil
+}
+
+// badAttestation counts a malformed attestation towards the disconnect, not towards the shares.
+func (c *sconn) badAttestation(msg string) *Error {
+	c.mu.Lock()
+	c.invalid++
+	c.mu.Unlock()
+	return &Error{ErrCodeInvalid, msg}
 }
 
 // deviceWeight is the Sharepool weight of a device's job: the heaviest whose target every share at
@@ -552,7 +664,7 @@ func (c *sconn) submit(raw json.RawMessage) (*SubmitResult, *Error) {
 	}
 	// A block is its own share; any other that meets the job's Sharepool target goes to the node.
 	if !isBlock && job.Shares && mh.MeetsTarget(&hash, &job.ShareTarget) {
-		if _, err := c.s.b.SubmitShare(job.ShareAt(nonce)); err != nil {
+		if _, err := c.s.b.SubmitStratumShare(job.ShareAt(nonce), c.ip); err != nil {
 			c.s.opt.Log.Printf("stratum: share from %s/%s refused by node: %v", c.addr, c.worker, err)
 		}
 	}

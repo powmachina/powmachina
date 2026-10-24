@@ -95,6 +95,13 @@ type Backend interface {
 	// SharePool sums the node's share pool by payout program; `full` is false on a node that
 	// holds no full DAG and so takes no shares.
 	SharePool() (full bool, tally map[[32]byte]chain.ShareTally)
+	// Credits is the credit state of the applied tip: the pot, the height it is at and every
+	// payout program's entry (the Sharepool spec §5).
+	Credits() (pot int64, height uint64, credits map[[32]byte]chain.Credit, err error)
+	// ShareGeo is where the shares the node took first came from, by country (ISO 3166-1 alpha-2):
+	// the last `minutes` and since the start, and the ones whose country is not known. Off without
+	// a GeoIP database.
+	ShareGeo() (enabled bool, minutes int, window map[string]int, seen map[string]uint64, unknown int, seenUnknown uint64)
 	// Generate mines blocks to an address — regtest only (testing wallets and exchanges).
 	Generate(count int, address string) ([][32]byte, error)
 }
@@ -302,6 +309,10 @@ func (s *Server) dispatch(req request) (any, error) {
 		return s.getBlockHash(req.Params)
 	case "getsharepool":
 		return s.getSharePool()
+	case "getcredits":
+		return s.getCredits(req.Params)
+	case "getsharegeo":
+		return s.getShareGeo()
 	case "getblocks":
 		return s.getBlocks(req.Params)
 	case "gettxout":
@@ -1057,6 +1068,82 @@ func (s *Server) getSharePool() (any, error) {
 	return out, nil
 }
 
+// MaxCredits caps the entries getcredits lists; `count` still counts every one.
+const MaxCredits = 10_000
+
+// getCredits lists the credit state: what each miner has earned toward its payout. The entries
+// come by the last block that settled a share of theirs, the most recent first, so the miners who
+// mine now are at the top, a tie by amount and then by address.
+func (s *Server) getCredits(params json.RawMessage) (any, error) {
+	var p struct {
+		Limit int `json:"limit"`
+	}
+	if len(params) > 0 {
+		if err := decodeParams(params, &p); err != nil {
+			return nil, err
+		}
+	}
+	if p.Limit <= 0 || p.Limit > MaxCredits {
+		p.Limit = MaxCredits
+	}
+	pot, height, credits, err := s.backend.Credits()
+	if err != nil {
+		return nil, err
+	}
+	type row struct {
+		addr string
+		c    chain.Credit
+	}
+	rows := make([]row, 0, len(credits))
+	for k, c := range credits {
+		a, err := s.backend.AddressOf(chain.ScriptVersionBasic, k[:])
+		if err != nil {
+			a = hex.EncodeToString(k[:])
+		}
+		rows = append(rows, row{a, c})
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		a, b := rows[i].c, rows[j].c
+		if a.LastShare != b.LastShare {
+			return a.LastShare > b.LastShare
+		}
+		if a.Amount != b.Amount {
+			return a.Amount > b.Amount
+		}
+		return rows[i].addr < rows[j].addr
+	})
+	out := make([]map[string]any, 0, min(len(rows), p.Limit))
+	for _, r := range rows[:min(len(rows), p.Limit)] {
+		out = append(out, map[string]any{
+			"address":     r.addr,
+			"amount_cogs": r.c.Amount,
+			"need_cogs":   chain.PayoutNeed(r.c.Threshold),
+			"last_share":  r.c.LastShare,
+			"paid_at":     r.c.PaidAt,
+		})
+	}
+	return map[string]any{"height": height, "pot_cogs": pot, "count": len(rows), "credits": out}, nil
+}
+
+// getShareGeo is the country of the shares the node took first: the country of the address each
+// came in from (a stratum device, or the peer that relayed it), the most first. No address is
+// kept anywhere.
+func (s *Server) getShareGeo() (any, error) {
+	on, minutes, window, seen, unknown, seenUnknown := s.backend.ShareGeo()
+	rows := make([]map[string]any, 0, len(seen))
+	for cc, n := range seen {
+		rows = append(rows, map[string]any{"country": cc, "shares": window[cc], "seen": n})
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		a, b := rows[i]["shares"].(int), rows[j]["shares"].(int)
+		if a != b {
+			return a > b
+		}
+		return rows[i]["country"].(string) < rows[j]["country"].(string)
+	})
+	return map[string]any{"enabled": on, "minutes": minutes, "countries": rows, "unknown": unknown, "seen_unknown": seenUnknown}, nil
+}
+
 // getLaneStats returns the state of the individual lanes.
 //
 // `getdifficulty` stays **scalar** and does not change here. DigiByte turned it into an object
@@ -1169,6 +1256,7 @@ var positionalNames = map[string][]string{
 	"getrawtransaction":  {"txid"},
 	"getaddress":         {"address", "before", "limit"},
 	"getrichlist":        {"limit"},
+	"getcredits":         {"limit"},
 	"sendrawtransaction": {"hex"},
 	"gettemplate":        {"lane"},
 	"getrawblocks":       {"from", "count"},

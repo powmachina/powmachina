@@ -702,7 +702,13 @@ func TestLiveSharepoolAPI(t *testing.T) {
 	}}
 	block := map[string]any{"id": strings.Repeat("a", 64), "height": 25, "lane": "G", "time": time.Now().Unix(),
 		"bits": "2000ffff", "txs": []string{}, "payout": a, "share_weight": 11, "settlement": tally}
-	node := fakeNode(t, map[string]any{"getsharepool": pool, "getblocks": blocks, "getblock": block})
+	credits := map[string]any{"height": 25, "pot_cogs": 0, "count": 1, "credits": []any{
+		map[string]any{"address": a, "amount_cogs": 1_000_000, "need_cogs": 5_000_000, "last_share": 25, "paid_at": 25},
+	}}
+	geo := map[string]any{"enabled": true, "minutes": 30, "unknown": 2, "countries": []any{
+		map[string]any{"country": "FI", "shares": 4, "seen": 9},
+	}}
+	node := fakeNode(t, map[string]any{"getsharepool": pool, "getblocks": blocks, "getblock": block, "getcredits": credits, "getsharegeo": geo})
 	defer node.Close()
 	h := newTestServer(t, node)
 
@@ -720,6 +726,23 @@ func TestLiveSharepoolAPI(t *testing.T) {
 	}
 	if len(live.Blocks) != 1 || live.Blocks[0].Closer == nil || live.Blocks[0].Paid.Units != 2000 || live.Blocks[0].Algo == "" {
 		t.Fatalf("the blocks: %+v", live.Blocks)
+	}
+	// The window is the pool and the block's settlement; the miner leads it with its credit.
+	if w := live.Window; w.Blocks != 1 || w.Shares != 6 || w.Units != 4000 || w.Miners != 1 || w.PaidOut != 1 {
+		t.Fatalf("the window: %+v", w)
+	}
+	if len(live.Top) != 1 || live.Top[0].Permille != 1000 || live.Top[0].CreditCogs != 1_000_000 || live.Top[0].NeedCogs != 5_000_000 || live.Top[0].Icon != want {
+		t.Fatalf("the leaderboard: %+v", live.Top)
+	}
+	if g := live.Geo; !g.Enabled || g.Unknown != 2 || len(g.Countries) != 1 || g.Countries[0].Country != "FI" || g.Countries[0].Seen != 9 {
+		t.Fatalf("the map: %+v", g)
+	}
+	var field LiveMiners
+	if err := json.Unmarshal(get(t, h, "/explorer/api/sharepool/miners").Body.Bytes(), &field); err != nil {
+		t.Fatal(err)
+	}
+	if field.Count != 1 || len(field.Miners) != 1 || field.Miners[0].Units != 4000 || field.Miners[0].Icon != want {
+		t.Fatalf("the miners: %+v", field)
 	}
 	ic := iconOf(a)
 	for row := range 5 {

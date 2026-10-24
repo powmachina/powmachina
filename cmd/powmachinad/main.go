@@ -21,6 +21,7 @@ import (
 
 	"powmachina/internal/address"
 	"powmachina/internal/chain"
+	"powmachina/internal/geoip"
 	"powmachina/internal/mh"
 	"powmachina/internal/p2p"
 	"powmachina/internal/rpc"
@@ -52,6 +53,8 @@ func main() {
 	serveBudget := flag.Int64("serve-budget-mib", 10240, "how many MiB the HTTP mirror may send (0 = no limit)")
 	dag := flag.String("dag", "auto", "DAG for verifying lane G: auto (full while syncing, light at the tip), full (~1 GiB+, miner), light (~26 MiB, slower first sync)")
 	banList := flag.String("banlist", "", "file the node writes banned IPs into for the firewall (one IP or /64 per line)")
+	geoipPath := flag.String("geoip", "", "DB-IP country CSV (.csv or .csv.gz) for the SharePool map of where shares come from; empty = off")
+	geoipIgnore := flag.String("geoip-ignore", "", "addresses or networks of the network's own nodes, comma separated: shares they relay here are not counted on the map (they were counted where they came in)")
 	metrics := flag.String("metrics", "", "address of the /metrics endpoint in Prometheus format (internal network only, e.g. 127.0.0.1:17694)")
 	flag.Parse()
 
@@ -105,7 +108,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "\n-mine is for regtest only; elsewhere use powmachina-miner")
 		os.Exit(2)
 	}
-	runNode(params, *listenAddr, *connectAddr, *rpcAddr, *stratumAddr, *stratumPay, *mineAddr, *anchors, *addnode, *datadir, *blockSrc, *serveBlocks, *metrics, *nodeName, *banList, dagMode, *serveBudget, *mine, *txIndex, *addrIndex, *allowPrivate)
+	runNode(params, *listenAddr, *connectAddr, *rpcAddr, *stratumAddr, *stratumPay, *mineAddr, *anchors, *addnode, *datadir, *blockSrc, *serveBlocks, *metrics, *nodeName, *banList, dagMode, *serveBudget, *mine, *txIndex, *addrIndex, *allowPrivate, *geoipPath, *geoipIgnore)
 }
 
 // networkFlags picks the network. Mainnet cannot be picked until it has a genesis: better to
@@ -124,7 +127,7 @@ func networkFlags(testnet, regtest bool) (chain.NetParams, error) {
 
 func runNode(params chain.NetParams, listenAddr, connectAddr, rpcAddr, stratumAddr, stratumPay, mineAddr, anchorsPath, addnode, datadir,
 	blockSrc, serveBlocks, metricsAddr, nodeName, banList string, dag dagMode, serveBudgetMiB int64, mine int,
-	txIndex, addrIndex, allowPrivate bool) {
+	txIndex, addrIndex, allowPrivate bool, geoipPath, geoipIgnore string) {
 	genesis := chain.Genesis(params)
 	if genesis == nil {
 		log.Fatalf("network %s has no genesis", params.Name)
@@ -160,6 +163,19 @@ func runNode(params chain.NetParams, listenAddr, connectAddr, rpcAddr, stratumAd
 
 	node.SetBanListPath(banList)
 	node.SetDagMode(dag)
+	if geoipPath != "" {
+		db, err := geoip.Load(geoipPath)
+		if err != nil {
+			log.Fatalf("-geoip: %v", err)
+		}
+		ignore, err := parsePrefixes(geoipIgnore)
+		if err != nil {
+			log.Fatalf("-geoip-ignore: %v", err)
+		}
+		node.SetShareGeo(db, ignore)
+		log.Printf("geoip: %d ranges from %s — the SharePool map counts countries (%d own networks not counted)",
+			db.Len(), geoipPath, len(ignore))
+	}
 	log.Printf("DAG: %s mode", dag)
 	if err := node.SetNodeName(nodeName); err != nil {
 		log.Fatalf("-nodename: %v", err)
@@ -326,7 +342,8 @@ func printParams() {
 		chain.HeaderBytes, chain.PoWBytes)
 	fmt.Printf("  lanes               C, G — at most %d of the same in a row, relief after %v\n",
 		chain.MaxSameLaneRun, chain.LaneRotationRelief)
-	fmt.Printf("  retarget            LWMA, window %d blocks of the same lane\n", chain.LwmaWindow)
+	fmt.Printf("  retarget            ASERT per lane, half-life %v, at most %d× per gap (LWMA, %d blocks, before the lane-difficulty fork)\n",
+		chain.AsertHalfLife, 1<<chain.AsertMaxHalvings, chain.LwmaWindow)
 	fmt.Printf("  DAG epoch           %d blocks\n", chain.EpochBlocks)
 
 	fmt.Printf("\nEmission\n")

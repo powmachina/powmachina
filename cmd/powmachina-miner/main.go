@@ -15,6 +15,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -22,6 +23,7 @@ import (
 
 	"powmachina/internal/address"
 	"powmachina/internal/chain"
+	"powmachina/internal/finkey"
 	"powmachina/internal/gpu"
 	"powmachina/internal/miner"
 	"powmachina/internal/nodeclient"
@@ -37,6 +39,7 @@ func main() {
 	node := flag.String("node", "", "solo: node RPC host:port (default 127.0.0.1:<network RPC port>)")
 	pool := flag.String("pool", "", "stratum: stratum+tcp://host:port or stratum+ssl://host:port (a node with -stratum, or a pool)")
 	worker := flag.String("worker", "", "stratum: name of this device (shown on the node/pool)")
+	finKey := flag.String("finality-key", "auto", "stratum: your own finality key, so the finality vote of the blocks you find is yours and not the pool's: auto (a key in your config directory, made the first time), a path to a key file, or none")
 	threads := flag.Int("threads", miner.DefaultThreads(), "CPU threads for lane C (default: cores, capped at L3 cache / 2 MiB)")
 	noAff := flag.Bool("no-affinity", false, "do not pin CPU threads to cores")
 	cpu := flag.Bool("cpu", true, "mine lane C on the CPU")
@@ -95,7 +98,9 @@ func main() {
 		if *worker != "" {
 			login += "." + *worker
 		}
-		feed = &stratum.Client{URL: *pool, Login: login, Pass: "x", Agent: "powmachina-miner/" + version, Log: logger}
+		cl := &stratum.Client{URL: *pool, Login: login, Pass: "x", Agent: "powmachina-miner/" + version, Log: logger}
+		cl.Finality = openFinalityKey(*finKey, params.Name, logger)
+		feed = cl
 		mode = "stratum " + *pool
 	} else {
 		v, prog, err := address.Decode(params.Bech32HRP, *addr)
@@ -258,4 +263,37 @@ func nodeHint(err error, params chain.NetParams) string {
 		"    powmachinad%s -rpc 127.0.0.1:%d\n\n"+
 		"The node inside the desktop wallet cannot be mined against — run powmachinad on its own,\n"+
 		"or mine to a pool with --pool.", network, params.RPCPort)
+}
+
+// openFinalityKey opens (or makes) the miner's own finality key for stratum. A key that cannot be
+// had is not a reason to stop mining: the miner says so and mines with the server's key.
+func openFinalityKey(spec, network string, logger *log.Logger) *finkey.Signer {
+	path := spec
+	switch spec {
+	case "none", "off", "":
+		return nil
+	case "auto":
+		dir, err := os.UserConfigDir()
+		if err != nil {
+			logger.Printf("finality: no config directory (%v) — mining with the pool's key; --finality-key=<file> sets one", err)
+			return nil
+		}
+		dir = filepath.Join(dir, "powmachina-miner", network)
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			logger.Printf("finality: %v — mining with the pool's key; --finality-key=<file> sets one", err)
+			return nil
+		}
+		path = filepath.Join(dir, "finality.key")
+	}
+	s, created, err := finkey.Load(path, path+".signed")
+	if err != nil {
+		logger.Printf("finality: %v — mining with the pool's key", err)
+		return nil
+	}
+	what := "finality key"
+	if created {
+		what = "a new finality key"
+	}
+	logger.Printf("%s %x… in %s — the blocks you find give it a seat in the finality quorum, and the miner signs for it", what, s.Pub[:6], path)
+	return s
 }

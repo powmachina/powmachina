@@ -42,7 +42,9 @@ func (f *stratumNode) PoWHash(h *chain.Header) ([32]byte, error) {
 	pow := h.PoWInput()
 	return f.h.Hash(f.v, &pow, h.Nonce, h.Lane)
 }
-func (f *stratumNode) SubmitShare(*chain.Share) (bool, error) { return false, nil }
+func (f *stratumNode) SubmitStratumShare(*chain.Share, string) (bool, error) { return false, nil }
+func (f *stratumNode) AttestDue([32]byte) (uint64, [32]byte, bool)           { return 0, [32]byte{}, false }
+func (f *stratumNode) SubmitAttestation(chain.Attestation) error             { return nil }
 func (f *stratumNode) SubmitBlock(b *chain.Block) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

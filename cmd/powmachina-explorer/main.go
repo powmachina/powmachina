@@ -28,6 +28,7 @@ func main() {
 	base := flag.String("base", "/explorer", "prefix the explorer is served under")
 	network := flag.String("network", "", "network name for the header (empty = ask the node)")
 	timeout := flag.Duration("timeout", 10*time.Second, "limit for a single request")
+	geoNodes := flag.String("geo-nodes", "", "more node RPC URLs whose share countries the SharePool map adds, comma separated (token: POWM_GEO_RPC_TOKEN)")
 	flag.Parse()
 
 	// The token comes from a file or from the environment, never from an argument: arguments
@@ -42,10 +43,17 @@ func main() {
 	}
 
 	cli := explorer.NewClient(*nodeURL, token, *timeout)
+	var geo []*explorer.Client
+	for _, u := range strings.Split(*geoNodes, ",") {
+		if u = strings.TrimSpace(u); u != "" {
+			geo = append(geo, explorer.NewClient(u, os.Getenv("POWM_GEO_RPC_TOKEN"), 3*time.Second))
+		}
+	}
 	srv, err := explorer.NewServer(cli, explorer.Config{
 		BasePath: *base,
 		Network:  *network,
 		Timeout:  *timeout,
+		GeoNodes: geo,
 	})
 	if err != nil {
 		log.Fatalf("explorer: %v", err)

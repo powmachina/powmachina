@@ -190,6 +190,7 @@ func (n *Node) metrics(now time.Time) string {
 	g("powm_dag_full", "1 = the node holds the full DAG", bl(n.epochs.isFull()))
 	g("powm_epoch", "the DAG epoch at the tip", float64(mh.EpochForHeight(height)))
 	g("powm_finality_depth", "finality depth in blocks", float64(chain.FinalityDepth))
+	n.stats.write(&b, n)
 	return b.String()
 }
 

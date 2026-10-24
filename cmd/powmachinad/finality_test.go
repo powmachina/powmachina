@@ -8,8 +8,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -105,12 +103,12 @@ func TestFinalityIgnoresForeignBlock(t *testing.T) {
 		t.Fatal(err)
 	}
 	target, id := pendingOf(t, node)
-	_ = node.acceptAttestation(chain.Sign(node.signer.priv, target, [32]byte{0xff}), "")
+	_ = node.acceptAttestation(chain.Sign(node.signer.Priv(), target, [32]byte{0xff}), "")
 	if _, _, ok := node.finality.Finalized(); ok {
 		t.Fatal("a block the node does not have was finalized")
 	}
 	// Its own block, signed by the same key... is a second block at that height: the key is caught.
-	_ = node.acceptAttestation(chain.Sign(node.signer.priv, target, id), "")
+	_ = node.acceptAttestation(chain.Sign(node.signer.Priv(), target, id), "")
 	if _, _, ok := node.finality.Finalized(); ok {
 		t.Fatal("a key caught signing twice finalized")
 	}
@@ -137,47 +135,6 @@ func TestAKeyWithoutASeatIsNotHeard(t *testing.T) {
 	}
 	if got := node.finality.InRange(0, target+100, 100); len(got) != 0 {
 		t.Fatalf("%d attestations of a stranger stored", len(got))
-	}
-}
-
-// The node's own signer never signs two blocks at one height, nor anything below what it signed —
-// not even after a restart, which is why the record is on disk before the signature exists.
-func TestTheSignerNeverSignsTwice(t *testing.T) {
-	dir := t.TempDir()
-	s, err := loadFinalitySigner(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	a, ok := s.sign(100, [32]byte{1})
-	if !ok {
-		t.Fatal("the first signature")
-	}
-	if _, ok := s.sign(100, [32]byte{2}); ok {
-		t.Fatal("a second block at the same height was signed")
-	}
-	if _, ok := s.sign(99, [32]byte{3}); ok {
-		t.Fatal("a height below the last one was signed")
-	}
-	again, ok := s.sign(100, [32]byte{1})
-	if !ok || string(again.Signature) != string(a.Signature) {
-		t.Fatal("the same block again should give the same signature")
-	}
-
-	reopened, err := loadFinalitySigner(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if reopened.pub != s.pub {
-		t.Fatal("the key changed across a restart")
-	}
-	if _, ok := reopened.sign(100, [32]byte{2}); ok {
-		t.Fatal("after a restart a second block at the same height was signed")
-	}
-	if _, ok := reopened.sign(101, [32]byte{4}); !ok {
-		t.Fatal("the next height was refused")
-	}
-	if fi, err := os.Stat(filepath.Join(dir, finalityKeyFile)); err != nil || fi.Mode().Perm() != 0o600 {
-		t.Fatalf("the key file: %v %v", fi.Mode(), err)
 	}
 }
 
@@ -306,7 +263,7 @@ func TestAttestationIsRelayed(t *testing.T) {
 		return len(node.conns) == 2
 	}, "the node did not register both connections")
 
-	att := chain.Sign(node.signer.priv, target, id)
+	att := chain.Sign(node.signer.Priv(), target, id)
 	payload, err := p2p.EncodeAttestation(att)
 	if err != nil {
 		t.Fatal(err)
@@ -339,5 +296,43 @@ func TestAttestationIsRelayed(t *testing.T) {
 	}
 	if got, _, ok := node.finality.Finalized(); !ok || got != target {
 		t.Fatalf("finality %d (%v), expected %d", got, ok, target)
+	}
+}
+
+// A miner on the stratum port with its own key: the node tells it which block to sign when the key
+// has a seat, takes its signature, and that signature finalizes — the same as the node's own would.
+func TestStratumMinerSignsThroughTheNode(t *testing.T) {
+	node := quietNode(t)
+	if err := node.MineBlocks(finalityBlocks); err != nil {
+		t.Fatal(err)
+	}
+	target, id := pendingOf(t, node)
+	// A key without a seat is asked for nothing.
+	if _, _, ok := node.AttestDue([32]byte{9}); ok {
+		t.Fatal("a key without a seat was asked to sign")
+	}
+	// The node's key has every seat here; it stands in for a miner that logged in with it.
+	h, due, ok := node.AttestDue(node.signer.Pub)
+	if !ok || h != target || due != id {
+		t.Fatalf("due: height %d ok %v, expected %d", h, ok, target)
+	}
+	// A signature of the wrong block is refused.
+	if err := node.SubmitAttestation(chain.Sign(node.signer.Priv(), target, [32]byte{0xee})); err == nil {
+		t.Fatal("a signature of a block the node does not have was taken")
+	}
+	fresh := quietNode(t)
+	if err := fresh.MineBlocks(finalityBlocks); err != nil {
+		t.Fatal(err)
+	}
+	ft, fid := pendingOf(t, fresh)
+	if err := fresh.SubmitAttestation(chain.Sign(fresh.signer.Priv(), ft, fid)); err != nil {
+		t.Fatalf("the miner's signature: %v", err)
+	}
+	if got, _, ok := fresh.finality.Finalized(); !ok || got != ft {
+		t.Fatalf("finality %d (%v), expected %d", got, ok, ft)
+	}
+	// The same signature again is not the miner's mistake.
+	if err := fresh.SubmitAttestation(chain.Sign(fresh.signer.Priv(), ft, fid)); err != nil {
+		t.Fatalf("the same signature again: %v", err)
 	}
 }

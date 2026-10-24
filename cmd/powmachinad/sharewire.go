@@ -108,7 +108,7 @@ func (n *Node) receiveShares(peer *p2p.Peer, payload []byte) error {
 		return err
 	}
 	for _, s := range shares {
-		if err := n.acceptShare(s, from); errors.Is(err, errBadShare) {
+		if err := n.acceptShare(s, from, from); errors.Is(err, errBadShare) {
 			n.peers.Misbehaving(peer, p2p.MisbehaviorBadMessage)
 			return nil
 		}

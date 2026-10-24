@@ -1,0 +1,39 @@
+# PowMachina for arm64 (Ampere, Graviton, a Raspberry Pi 5) — cross-compiled on an amd64
+# builder, so the CI needs no emulator: the build stage runs natively and the image's own stage only
+# copies files.
+#
+#   docker build --platform linux/arm64 -f Dockerfile.arm64 -t powmachina:arm64 .
+#
+# --platform is what makes it an arm64 image: without it the image is labelled with the builder's
+# platform, and an arm64 machine finds "no matching manifest".
+#
+# The node, the wallet and the miner's CPU lane; the GPU plugin is x86 (CUDA) only.
+
+FROM --platform=$BUILDPLATFORM golang:1.27-bookworm AS build
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libc6-dev-arm64-cross \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+
+RUN CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc CXX=aarch64-linux-gnu-g++ \
+    go build -trimpath -ldflags="-s -w" -o /out/ \
+        ./cmd/powmachinad ./cmd/powmachina-wallet-cli ./cmd/powmachina-wallet-rpc \
+        ./cmd/powmachina-miner
+
+# distroless/cc: glibc and libstdc++ of bookworm (the builder's), CA certificates, nothing else — and
+# no RUN step, which on an amd64 builder would need an emulator.
+FROM gcr.io/distroless/cc-debian12
+COPY --from=build /out/ /usr/local/bin/
+COPY --from=build /src/LICENSE /src/NOTICE /usr/share/doc/powmachina/
+# The same uid as the amd64 image (10001), so one datadir ownership works for both.
+USER 10001:10001
+WORKDIR /data
+VOLUME /data
+EXPOSE 27696 27697
+ENTRYPOINT ["/usr/local/bin/powmachinad"]
+CMD ["-h"]

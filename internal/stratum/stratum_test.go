@@ -28,6 +28,15 @@ type fakeNode struct {
 	v      *mh.Verifier
 	h      *mh.Hasher
 	shares []*chain.Share
+	// finality: the node's key in templates, the block a key should sign, the signatures taken
+	nodeKey string
+	due     map[[32]byte]dueAttest
+	atts    []chain.Attestation
+}
+
+type dueAttest struct {
+	height uint64
+	block  [32]byte
 }
 
 func newFakeNode(t *testing.T) *fakeNode {
@@ -52,7 +61,8 @@ func (f *fakeNode) WorkTemplate(lane mh.Lane) (*work.Template, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return &work.Template{Height: f.height + 1, Lane: lane.String(), Bits: fmt.Sprintf("%08x", chain.RegtestTargetBits),
-		PrevBlock: hex.EncodeToString(f.tip[:]), MinTime: 1_700_000_001, CreditRoot: strings.Repeat("00", 32)}, nil
+		PrevBlock: hex.EncodeToString(f.tip[:]), MinTime: 1_700_000_001, CreditRoot: strings.Repeat("00", 32),
+		FinalityKey: f.nodeKey}, nil
 }
 func (f *fakeNode) PoWHash(h *chain.Header) ([32]byte, error) {
 	f.mu.Lock()
@@ -71,11 +81,25 @@ func (f *fakeNode) SubmitBlock(b *chain.Block) error {
 	return nil
 }
 
-func (f *fakeNode) SubmitShare(s *chain.Share) (bool, error) {
+func (f *fakeNode) SubmitStratumShare(s *chain.Share, ip string) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.shares = append(f.shares, s)
 	return false, nil
+}
+
+func (f *fakeNode) AttestDue(key [32]byte) (uint64, [32]byte, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	d, ok := f.due[key]
+	return d.height, d.block, ok
+}
+
+func (f *fakeNode) SubmitAttestation(a chain.Attestation) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.atts = append(f.atts, a)
+	return nil
 }
 
 // A device's job carries the heaviest Sharepool weight its stratum target still meets: every share

@@ -22,6 +22,7 @@ import (
 	"powmachina/internal/address"
 	"powmachina/internal/blocksync"
 	"powmachina/internal/chain"
+	"powmachina/internal/finkey"
 	"powmachina/internal/mh"
 	"powmachina/internal/p2p"
 )
@@ -29,6 +30,8 @@ import (
 // Node ties together the header chain, the addrman and the peer manager: it listens, shakes
 // hands, serves getheaders and syncs from a peer — exactly what a running network needs.
 type Node struct {
+	// geo is the map of where shares come from; nil = off (-geoip).
+	geo     *shareGeo
 	params  chain.NetParams
 	chain   *chain.HeaderChain
 	store   *store.Store
@@ -41,7 +44,11 @@ type Node struct {
 	catchingUp bool // DAG auto mode: the node is catching up on history (guarded by mu)
 	finality   *chain.FinalityState
 	// signer is the node's finality key (finality.go); its blocks are its seats in the quorum.
-	signer     *finalitySigner
+	signer *finkey.Signer
+	// stats: what the node counts about the network for /metrics (netstats.go); applyStart is
+	// when the block being applied started (under applyMu).
+	stats      netStats
+	applyStart time.Time
 	noAttest   bool // the node keeps its key in its blocks but does not sign (tests)
 	seatMu     sync.Mutex
 	seats      map[[32]byte]chain.Seat    // block id → its seat (guarded by seatMu)
@@ -53,11 +60,13 @@ type Node struct {
 	epochs     *epochCache
 	settled    settledIndex     // what the recent blocks settled (settlement.go)
 	shares     *chain.SharePool // the verified shares a block could still settle
-	nonce      uint64
-	agent      string
-	nodeName   string
-	minerKey   []byte     // where development mining (-mine) pays; the node has no keys otherwise
-	genMu      sync.Mutex // generatetoaddress one at a time
+	// shareOrphans are shares that came before the block they build on (shareorphans.go).
+	shareOrphans shareOrphans
+	nonce        uint64
+	agent        string
+	nodeName     string
+	minerKey     []byte     // where development mining (-mine) pays; the node has no keys otherwise
+	genMu        sync.Mutex // generatetoaddress one at a time
 	// applyMu serialises accepting a block (from a peer, submitblock, -mine) — one at a time.
 	// It is an RWMutex and not a Mutex because of the **read** side: a mining template has to
 	// see the tip and the mempool as one state. Applying a block moves the tip in
@@ -69,6 +78,8 @@ type Node struct {
 	// takes applyMu again, so it cannot deadlock.
 	applyMu sync.RWMutex
 	stratum *stratum.Server
+	// stratumKick is the same server for telling it about a new tip without n.mu.
+	stratumKick atomic.Pointer[stratum.Server]
 	// blockSources are HTTP mirrors of block bodies (`-blocksource`). Accelerators, not authorities.
 	blockSources []string
 
@@ -333,7 +344,7 @@ func newNode(params chain.NetParams, genesis *chain.Header, profile mh.DagProfil
 		if err != nil {
 			panic(err)
 		}
-		n.signer = newFinalitySigner(priv, "")
+		n.signer = finkey.New(priv, "")
 	}
 
 	return n
@@ -848,6 +859,7 @@ func (n *Node) acceptHeaders(peer *p2p.Peer, headers []*chain.Header) (int, erro
 			if perr := n.store.PutHeader(h); perr != nil {
 				return added, perr
 			}
+			n.stats.heard(h.ID(), time.Now())
 			added++
 			tipMoved = tipMoved || changed
 		case err == chain.ErrDuplicate:
@@ -1123,8 +1135,24 @@ var (
 // announces it to the peers. The block has to build on the current tip — a miner does not
 // mine onto a side branch.
 func (n *Node) SubmitBlock(blk *chain.Block) error {
+	err := n.submitBlock(blk)
+	switch {
+	case err == nil:
+		n.stats.inc(&n.stats.submits, "accepted")
+	case errors.Is(err, ErrBlockStale):
+		n.stats.inc(&n.stats.submits, "stale")
+	case errors.Is(err, ErrBlockDuplicate):
+		n.stats.inc(&n.stats.submits, "duplicate")
+	default:
+		n.stats.inc(&n.stats.submits, "invalid")
+	}
+	return err
+}
+
+func (n *Node) submitBlock(blk *chain.Block) error {
 	n.applyMu.Lock()
 	defer n.applyMu.Unlock()
+	n.applyStart = time.Now()
 	h := blk.Header
 	id := h.ID()
 	if n.chain.Has(id) {
@@ -1148,6 +1176,7 @@ func (n *Node) SubmitBlock(blk *chain.Block) error {
 	if _, err := n.chain.AddHeader(h, pow); err != nil {
 		return fmt.Errorf("invalid header: %w", err)
 	}
+	n.stats.heard(id, n.applyStart)
 	if err := n.store.PutBlock(blk); err != nil {
 		return err
 	}

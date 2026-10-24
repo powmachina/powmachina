@@ -559,6 +559,7 @@ func (n *Node) ApplyReadyBodies() error {
 		var failed *chain.Block
 		applied, err := n.store.ApplyStored(headerTip, store.ApplyHooks{
 			Validate: func(b *chain.Block) error {
+				n.applyStart = time.Now()
 				view := &checkedCoins{s: n.store}
 				if verr := b.ValidateBlock(view, n.params); verr != nil {
 					if view.err != nil {
@@ -725,6 +726,7 @@ func (n *Node) relayApplied(blk *chain.Block) {
 // does not know about it on its own — without this, `ApplyStored` would hit "the block does not
 // build on the tip" and the node would stall below the fork forever.
 func (n *Node) reconcileUTXOTip() error {
+	var rolled uint64
 	for {
 		tip, err := n.store.Tip()
 		if err != nil {
@@ -732,6 +734,9 @@ func (n *Node) reconcileUTXOTip() error {
 		}
 		active, ok := n.chain.BlockIDAt(tip.Height)
 		if ok && active == tip.ID {
+			if rolled > 0 {
+				n.stats.reorged(rolled)
+			}
 			return nil
 		}
 		if tip.Height == 0 {
@@ -749,6 +754,7 @@ func (n *Node) reconcileUTXOTip() error {
 		if err := n.store.RevertTip(); err != nil {
 			return fmt.Errorf("UTXO reorg: %w", err)
 		}
+		rolled++
 		log.Printf("reorg: the UTXO set rolled back below height %d (block %x is no longer on the active branch)",
 			tip.Height, tip.ID[:6])
 	}
@@ -921,7 +927,10 @@ func (n *Node) checkBodyCopy(blk *chain.Block) error {
 
 // onBlockApplied is what belongs to a new tip and not in storage.
 func (n *Node) onBlockApplied(b *chain.Block) {
+	now := time.Now()
+	n.stats.applied(b, now.Sub(n.applyStart), now)
 	n.mempool.RemoveConfirmed(b)
+	go n.retryOrphanShares(b.Header.ID())
 	// The mempool holds what was valid for this block's height. When the next block is the
 	// first under a new rule, what is in the pool is checked against it — a transaction signed
 	// the old way would otherwise go into a template and make our own block invalid.
@@ -941,5 +950,10 @@ func (n *Node) onBlockApplied(b *chain.Block) {
 	n.attestTip(b)
 	if _, tip, _ := n.chain.Tip(); tip == uint64(b.Header.Height) {
 		n.shares.Expire(tip)
+		// Without n.mu: a block is applied under applyMu, and n.mu is taken in too many places
+		// to be sure none of them waits for applyMu.
+		if st := n.stratumKick.Load(); st != nil {
+			st.TipChanged()
+		}
 	}
 }

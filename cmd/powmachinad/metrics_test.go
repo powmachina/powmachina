@@ -54,6 +54,12 @@ func parseMetrics(t *testing.T, out string) map[string]float64 {
 				}
 				name = name[:i]
 			}
+			// A histogram's samples carry suffixes on the name its HELP/TYPE gave.
+			for _, suf := range []string{"_bucket", "_sum", "_count"} {
+				if base := strings.TrimSuffix(name, suf); base != name && typ[base] {
+					name = base
+				}
+			}
 			if !help[name] || !typ[name] {
 				t.Fatalf("%s: metric %s has no HELP/TYPE before its first value", where, name)
 			}
@@ -80,6 +86,9 @@ func TestMetricsScrapeIsWellFormed(t *testing.T) {
 		"powm_finality_height", "powm_finality_ok", "powm_trusted_work",
 		"powm_peers", "powm_mempool_txs", "powm_mempool_bytes",
 		"powm_time_offset_seconds", "powm_epoch", "powm_finality_depth",
+		`powm_shares_received_total{result="accepted"}`, `powm_blocks_submitted_total{result="stale"}`,
+		"powm_reorgs_total", "powm_sibling_switches_total", "powm_block_process_seconds_count",
+		"powm_tip_seen_timestamp_seconds", "powm_tip_settled_units", "powm_credit_keys",
 	} {
 		if _, ok := vals[want]; !ok {
 			t.Errorf("%s is missing from the scrape", want)
@@ -98,6 +107,10 @@ func TestMetricsScrapeIsWellFormed(t *testing.T) {
 	}
 	if vals["powm_finality_depth"] != float64(chain.FinalityDepth) {
 		t.Errorf("finality_depth = %v", vals["powm_finality_depth"])
+	}
+	// Every block the node mined went through processing once.
+	if vals["powm_block_process_seconds_count"] != 4 || vals[`powm_block_process_seconds_bucket{le="+Inf"}`] != 4 {
+		t.Errorf("block_process_seconds counted %v blocks, expected 4", vals["powm_block_process_seconds_count"])
 	}
 }
 

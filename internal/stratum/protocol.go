@@ -61,6 +61,10 @@ type LoginParams struct {
 	Pass  string   `json:"pass,omitempty"`
 	Agent string   `json:"agent,omitempty"`
 	Lanes []string `json:"lanes"`
+	// FinalityKey is the miner's own finality key (32 B Ed25519, hex). The blocks it finds carry
+	// it, so their seats in the finality quorum are the miner's and not the server's, and the
+	// server asks the miner to sign (`attest`). Empty = the server's key.
+	FinalityKey string `json:"finality_key,omitempty"`
 }
 
 // LoginResult is the answer to a login. The jobs arrive right after it as `job` notifications.
@@ -91,6 +95,21 @@ type HashrateParams struct {
 type PauseParams struct {
 	Lane   string `json:"lane"`
 	Reason string `json:"reason"`
+}
+
+// AttestParams is the `attest` notification: the miner's key has a seat in the quorum of a block,
+// and the server asks it to sign that block (the finality spec). The miner answers with an
+// `attestation` request.
+type AttestParams struct {
+	Height uint64 `json:"height"`
+	Block  string `json:"block"` // the block id, hex
+}
+
+// AttestationParams is the `attestation` request: the miner's signature of a block.
+type AttestationParams struct {
+	Height    uint64 `json:"height"`
+	Block     string `json:"block"`     // the block id, hex
+	Signature string `json:"signature"` // 64 B Ed25519, hex
 }
 
 // SubmitParams: the nonce is a 64-bit number written as 16 hex digits (the number in big-endian form).

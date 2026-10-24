@@ -32,6 +32,9 @@ type Config struct {
 	TxsPerPage int
 	// Timeout is the cap on one request including the calls to the node.
 	Timeout time.Duration
+	// GeoNodes are more nodes whose share countries the SharePool map sums with the main node's:
+	// the public nodes the network's shares come in through (getsharegeo).
+	GeoNodes []*Client
 }
 
 func (c *Config) applyDefaults() {
@@ -129,6 +132,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET "+b+"/richlist", s.handleRichList)
 	mux.HandleFunc("GET "+b+"/shares", s.handleShares)
 	mux.HandleFunc("GET "+b+"/api/sharepool", s.handleLive)
+	mux.HandleFunc("GET "+b+"/api/sharepool/miners", s.handleLiveMiners)
 	mux.HandleFunc("GET "+b+"/search", s.handleSearch)
 	mux.HandleFunc("GET "+b+s.cssPath, s.handleCSS)
 	// The plain address works too, for anything that links the stylesheet without the fingerprint.

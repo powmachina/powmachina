@@ -1,20 +1,15 @@
 package main
 
 import (
-	"crypto/ed25519"
-	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
-	"strings"
-	"sync"
 
 	"powmachina/internal/chain"
+	"powmachina/internal/finkey"
 	"powmachina/internal/p2p"
 )
 
@@ -32,112 +27,22 @@ const (
 	finalityStateFile  = "finality.json"
 )
 
-// finalitySigner is the node's key and the record of the last block it signed.
-type finalitySigner struct {
-	mu   sync.Mutex
-	priv ed25519.PrivateKey
-	pub  [32]byte
-	// path is where the last signed height is recorded; empty for a node in memory.
-	path       string
-	lastHeight uint64
-	lastID     [32]byte
-	signed     bool
-}
-
-func newFinalitySigner(priv ed25519.PrivateKey, path string) *finalitySigner {
-	s := &finalitySigner{priv: priv, path: path}
-	copy(s.pub[:], priv.Public().(ed25519.PublicKey))
-	return s
-}
-
 // loadFinalitySigner opens the node's key in the datadir, making one the first time.
-func loadFinalitySigner(datadir string) (*finalitySigner, error) {
+func loadFinalitySigner(datadir string) (*finkey.Signer, error) {
 	keyPath := filepath.Join(datadir, finalityKeyFile)
-	raw, err := os.ReadFile(keyPath)
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		seed := make([]byte, ed25519.SeedSize)
-		if _, err := rand.Read(seed); err != nil {
-			return nil, err
-		}
-		if err := writeFileSync(keyPath, []byte(hex.EncodeToString(seed)+"\n"), 0o600); err != nil {
-			return nil, fmt.Errorf("the finality key cannot be written: %w", err)
-		}
-		raw = []byte(hex.EncodeToString(seed))
-		log.Printf("finality: a new key in %s", keyPath)
-	case err != nil:
-		return nil, fmt.Errorf("the finality key cannot be read: %w", err)
-	}
-	seed, err := hex.DecodeString(strings.TrimSpace(string(raw)))
-	if err != nil || len(seed) != ed25519.SeedSize {
-		return nil, fmt.Errorf("%s is not a finality key (64 hex characters)", keyPath)
-	}
-	s := newFinalitySigner(ed25519.NewKeyFromSeed(seed), filepath.Join(datadir, finalitySignedFile))
-
-	// What it signed last. Without this a restart after a deep reorg could sign a second block at
-	// a height it already signed — the one thing a key must never do.
-	if raw, err := os.ReadFile(s.path); err == nil {
-		var rec struct {
-			Height uint64 `json:"height"`
-			Block  string `json:"block"`
-		}
-		if err := json.Unmarshal(raw, &rec); err != nil {
-			return nil, fmt.Errorf("%s: %w", s.path, err)
-		}
-		id, err := hex.DecodeString(rec.Block)
-		if err != nil || len(id) != 32 {
-			return nil, fmt.Errorf("%s: the block is not an id", s.path)
-		}
-		s.lastHeight, s.signed = rec.Height, true
-		copy(s.lastID[:], id)
-	} else if !errors.Is(err, fs.ErrNotExist) {
+	s, created, err := finkey.Load(keyPath, filepath.Join(datadir, finalitySignedFile))
+	if err != nil {
 		return nil, err
+	}
+	if created {
+		log.Printf("finality: a new key in %s", keyPath)
 	}
 	return s, nil
 }
 
-// sign signs a block unless the key has signed another block at that height or anything above it.
-// The record goes to disk before the signature exists: after a crash an attestation is missing,
-// never a second one made. The same block again is signed again — Ed25519 is deterministic, so it
-// is the same signature, and it is how finality catches up after the whole network restarted.
-func (s *finalitySigner) sign(height uint64, id [32]byte) (chain.Attestation, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.signed && (height < s.lastHeight || height == s.lastHeight && id != s.lastID) {
-		return chain.Attestation{}, false
-	}
-	if !s.signed || height != s.lastHeight {
-		if s.path != "" {
-			rec, _ := json.Marshal(map[string]any{"height": height, "block": hex.EncodeToString(id[:])})
-			if err := writeFileSync(s.path, rec, 0o600); err != nil {
-				log.Printf("⚠ finality: the signed height cannot be recorded, not signing: %v", err)
-				return chain.Attestation{}, false
-			}
-		}
-		s.lastHeight, s.lastID, s.signed = height, id, true
-	}
-	return chain.Sign(s.priv, height, id), true
-}
-
 // writeFileSync writes a file whole or not at all: a temporary file, fsync, rename.
 func writeFileSync(path string, data []byte, perm os.FileMode) error {
-	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
-	if err != nil {
-		return err
-	}
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return finkey.WriteFileSync(path, data, perm)
 }
 
 // FinalityKey is the node's finality key, the one that goes into the coinbase (nil = none).
@@ -145,7 +50,7 @@ func (n *Node) FinalityKey() *[32]byte {
 	if n.finality == nil || n.signer == nil {
 		return nil
 	}
-	k := n.signer.pub
+	k := n.signer.Pub
 	return &k
 }
 
@@ -215,8 +120,15 @@ func (n *Node) quorumAt(height uint64) *chain.Quorum {
 // is dropped and not relayed, so nobody can flood the network with made-up keys. A node that is
 // behind asks for what it missed later (pollAttestations).
 func (n *Node) acceptAttestation(att chain.Attestation, from string) error {
+	_ = n.addAttestation(att, from)
+	return nil // not a reason to ban: the peer may be on another branch or ahead of us
+}
+
+// addAttestation is acceptAttestation that says why an attestation was not taken — for a miner
+// signing through the stratum port, who is told.
+func (n *Node) addAttestation(att chain.Attestation, from string) error {
 	if n.finality == nil {
-		return nil // the network does not use finality
+		return errors.New("the network does not use finality")
 	}
 	ev, err := n.finality.Add(att, n.quorumAt(att.Height))
 	if ev != nil {
@@ -225,15 +137,51 @@ func (n *Node) acceptAttestation(att chain.Attestation, from string) error {
 		if payload, encErr := p2p.EncodeEquivocation(ev); encErr == nil {
 			n.announceRaw(p2p.CmdEquivocation, payload, "")
 		}
-		return nil
+		return errors.New("the key signed two blocks at that height")
 	}
 	if err != nil {
-		return nil // not a reason to ban: the peer may be on another branch or ahead of us
+		return err
 	}
 	n.updateFinality()
 	if payload, err := p2p.EncodeAttestation(att); err == nil {
 		n.announceRaw(p2p.CmdAttestation, payload, from)
 	}
+	return nil
+}
+
+// AttestDue implements stratum.Backend: the block at the finality depth below the tip, when the
+// key has a seat in its quorum — what a miner with its own key should sign now.
+func (n *Node) AttestDue(key [32]byte) (uint64, [32]byte, bool) {
+	if n.finality == nil {
+		return 0, [32]byte{}, false
+	}
+	_, tip, _ := n.chain.Tip()
+	if tip < chain.FinalityDepth {
+		return 0, [32]byte{}, false
+	}
+	target := tip - chain.FinalityDepth
+	id, ok := n.chain.BlockIDAt(target)
+	if !ok || n.quorumAt(target).Weight(key) == 0 {
+		return 0, [32]byte{}, false
+	}
+	return target, id, true
+}
+
+// SubmitAttestation implements stratum.Backend: a miner's signature from the stratum port.
+// One the node already has — or a height already final — is not the miner's mistake.
+//
+// It has to be the block of that height on the node's chain: the port asks for those and takes
+// nothing else, so it is not a way to put a signature of another branch into the network.
+func (n *Node) SubmitAttestation(a chain.Attestation) error {
+	if id, ok := n.chain.BlockIDAt(a.Height); !ok || id != a.BlockID {
+		n.stats.inc(&n.stats.attests, "refused")
+		return errors.New("not the block of that height on this node's chain")
+	}
+	if err := n.addAttestation(a, ""); err != nil && !errors.Is(err, chain.ErrDuplicateAttestation) {
+		n.stats.inc(&n.stats.attests, "refused")
+		return err
+	}
+	n.stats.inc(&n.stats.attests, "accepted")
 	return nil
 }
 
@@ -276,11 +224,14 @@ func (n *Node) attestTip(applied *chain.Block) {
 	if !ok {
 		return
 	}
-	if n.quorumAt(target).Weight(n.signer.pub) == 0 {
+	if n.quorumAt(target).Weight(n.signer.Pub) == 0 {
 		return
 	}
-	att, ok := n.signer.sign(target, id)
-	if !ok {
+	att, err := n.signer.Sign(target, id)
+	if err != nil {
+		if !errors.Is(err, finkey.ErrRefused) {
+			log.Printf("⚠ %v", err)
+		}
 		return
 	}
 	_ = n.acceptAttestation(att, "")
