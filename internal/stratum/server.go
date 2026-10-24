@@ -438,10 +438,14 @@ func (c *sconn) pushJobs() {
 func (c *sconn) pushJob(id mh.Lane) {
 	t, err := c.s.b.WorkTemplate(id)
 	var block [32]byte
+	var easiest *big.Int
 	if err == nil {
 		var bits uint32
 		if bits, err = work.ParseBits(t.Bits); err == nil {
 			block, err = chain.CompactToTarget(bits)
+		}
+		if err == nil {
+			easiest = easiestTarget(t, bits, c.s.b.Params())
 		}
 	}
 	c.mu.Lock()
@@ -451,10 +455,10 @@ func (c *sconn) pushJob(id mh.Lane) {
 	blockN := new(big.Int).SetBytes(block[:])
 	if err == nil {
 		if st.target == nil {
-			// The start: 256× easier than a block (capped at the network's easiest target). Vardiff evens it out within minutes.
+			// The start: 256× easier than a block (capped at the easiest target). Vardiff evens it out within minutes.
 			st.target = new(big.Int).Lsh(blockN, 8)
 		}
-		st.target = clampTarget(st.target, blockN, c.s.b.Params())
+		st.target = clampTarget(st.target, blockN, easiest)
 	}
 	var target [32]byte
 	if st.target != nil {
@@ -571,16 +575,30 @@ func deviceWeight(t *work.Template, target [32]byte) uint8 {
 	return 0
 }
 
-// clampTarget keeps the share target between the block's target (never harder) and the network's easiest target.
-func clampTarget(t, block *big.Int, p chain.NetParams) *big.Int {
-	limit, err := chain.CompactToTarget(p.PowLimitBits)
-	max := new(big.Int).Sub(two256, big.NewInt(1))
-	if err == nil {
-		max = new(big.Int).SetBytes(limit[:])
+// easiestTarget is the easiest share target a device may get. On a node that takes shares it is
+// the lightest Sharepool share (weight 0, SharesPerLaneBlock times easier than the block): a stratum
+// share any easier would be paid by nothing, and one any harder is not needed. A node that takes
+// no shares keeps the network's easiest block target. The difference shows on a chain whose
+// difficulty sits near its floor — a testnet, a young mainnet: there that floor is only a few times
+// easier than a block, and a small CPU would find a share every few minutes instead of every 15 s.
+func easiestTarget(t *work.Template, bits uint32, p chain.NetParams) *big.Int {
+	if t.TakesShares {
+		if st, err := chain.ShareTarget(bits, 0); err == nil {
+			return new(big.Int).SetBytes(st[:])
+		}
 	}
+	if limit, err := chain.CompactToTarget(p.PowLimitBits); err == nil {
+		return new(big.Int).SetBytes(limit[:])
+	}
+	return new(big.Int).Sub(two256, big.NewInt(1))
+}
+
+// clampTarget keeps the share target between the block's target (never harder) and the easiest
+// target (easiestTarget).
+func clampTarget(t, block, easiest *big.Int) *big.Int {
 	out := new(big.Int).Set(t)
-	if out.Cmp(max) > 0 {
-		out.Set(max)
+	if easiest != nil && out.Cmp(easiest) > 0 {
+		out.Set(easiest)
 	}
 	if out.Cmp(block) < 0 {
 		out.Set(block)
@@ -654,7 +672,9 @@ func (c *sconn) submit(raw json.RawMessage) (*SubmitResult, *Error) {
 		return nil, &Error{ErrCodeLowDiff, "low difficulty share"}
 	}
 	isBlock := false
-	if mh.MeetsTarget(&hash, &job.BlockTarget) {
+	// A job for a lane the rotation rule blocks (NoBlock) has no block to find: a hash at the
+	// block's target is a share like any other.
+	if !job.NoBlock && mh.MeetsTarget(&hash, &job.BlockTarget) {
 		if err := c.s.b.SubmitBlock(job.Block(nonce)); err != nil {
 			c.s.opt.Log.Printf("stratum: block from %s/%s rejected by node: %v", c.addr, c.worker, err)
 		} else {

@@ -32,6 +32,8 @@ type fakeNode struct {
 	nodeKey string
 	due     map[[32]byte]dueAttest
 	atts    []chain.Attestation
+	// takesShares / noBlock go into the templates (a full-DAG node; a lane the rotation blocks).
+	takesShares, noBlock bool
 }
 
 type dueAttest struct {
@@ -62,7 +64,7 @@ func (f *fakeNode) WorkTemplate(lane mh.Lane) (*work.Template, error) {
 	defer f.mu.Unlock()
 	return &work.Template{Height: f.height + 1, Lane: lane.String(), Bits: fmt.Sprintf("%08x", chain.RegtestTargetBits),
 		PrevBlock: hex.EncodeToString(f.tip[:]), MinTime: 1_700_000_001, CreditRoot: strings.Repeat("00", 32),
-		FinalityKey: f.nodeKey}, nil
+		FinalityKey: f.nodeKey, TakesShares: f.takesShares, NoBlock: f.noBlock}, nil
 }
 func (f *fakeNode) PoWHash(h *chain.Header) ([32]byte, error) {
 	f.mu.Lock()

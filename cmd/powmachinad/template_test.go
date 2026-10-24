@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/hex"
 	"net"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -218,5 +219,39 @@ func TestTemplateCarriesTheBlockVersion(t *testing.T) {
 	}
 	if checked == 0 {
 		t.Fatal("no lane gave a template — the test did not test anything")
+	}
+}
+
+// A lane the rotation rule blocks has no template for gettemplate, but the node's stratum port gets
+// one for shares only (NoBlock) when the node takes shares.
+func TestBlockedLaneHasASharesOnlyTemplate(t *testing.T) {
+	node := NewNode(chain.RegTest, chain.RegtestGenesis(), mh.TestProfile)
+	defer node.Close()
+	var blocked mh.Lane
+	found := false
+	for i := 0; i < 8 && !found; i++ {
+		if err := node.SubmitBlock(mineBlockWith(t, node, nil)); err != nil {
+			t.Fatal(err)
+		}
+		allowed := node.chain.AllowedLanesNow(time.Now())
+		for _, l := range []mh.Lane{mh.LaneC, mh.LaneG} {
+			if !slices.Contains(allowed, l) {
+				blocked, found = l, true
+			}
+		}
+	}
+	if !found {
+		t.Skip("the rotation relief keeps both lanes open on this clock")
+	}
+	if _, err := node.Template(blocked); err == nil {
+		t.Fatal("gettemplate gave a template for a blocked lane")
+	}
+	tpl, err := node.template(blocked, true)
+	if node.epochs.isFull() {
+		if err != nil || !tpl.NoBlock || !tpl.TakesShares {
+			t.Fatalf("a full node's stratum: %+v, %v; want a shares-only template", tpl, err)
+		}
+	} else if err == nil {
+		t.Fatal("a light node gave a shares-only template")
 	}
 }

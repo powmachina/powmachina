@@ -15,7 +15,7 @@ import (
 
 // WorkTemplate implements stratum.Backend.
 func (n *Node) WorkTemplate(lane mh.Lane) (*work.Template, error) {
-	t, err := n.Template(lane)
+	t, err := n.template(lane, true)
 	if err != nil {
 		return nil, err
 	}
@@ -25,7 +25,8 @@ func (n *Node) WorkTemplate(lane mh.Lane) (*work.Template, error) {
 	}
 	return &work.Template{Height: t.Height, Lane: t.Lane, Bits: t.Bits, PrevBlock: t.PrevBlock,
 		MinTime: t.MinTime, Version: t.Version, Fees: t.Fees, Txs: t.Txs, FinalityKey: t.FinalityKey,
-		Settlement: t.Settlement, Payouts: payouts, CreditRoot: t.CreditRoot, TakesShares: t.TakesShares}, nil
+		Settlement: t.Settlement, Payouts: payouts, CreditRoot: t.CreditRoot, TakesShares: t.TakesShares,
+		NoBlock: t.NoBlock}, nil
 }
 
 // TipID implements stratum.Backend.

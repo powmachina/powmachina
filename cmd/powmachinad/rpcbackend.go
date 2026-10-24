@@ -149,7 +149,13 @@ func (n *Node) Generate(count int, addr string) ([][32]byte, error) {
 // between "the block is applied" and "the mempool is cleaned", take a transaction the new tip
 // has already confirmed, and the block the miner finds from it is rejected by the node —
 // see the comment on Node.applyMu.
-func (n *Node) Template(lane mh.Lane) (*rpc.Template, error) {
+func (n *Node) Template(lane mh.Lane) (*rpc.Template, error) { return n.template(lane, false) }
+
+// template is Template; sharesOnly lets a lane the rotation rule blocks have a template all the
+// same, marked NoBlock, when the node takes shares: a share does not depend on the rotation (it
+// is work on its parent, and the Sharepool pays it), so the devices on the node's stratum port go
+// on mining shares instead of standing still until the other lane's block.
+func (n *Node) template(lane mh.Lane, sharesOnly bool) (*rpc.Template, error) {
 	n.applyMu.RLock()
 	defer n.applyMu.RUnlock()
 
@@ -161,8 +167,12 @@ func (n *Node) Template(lane mh.Lane) (*rpc.Template, error) {
 			break
 		}
 	}
+	noBlock := false
 	if !ok {
-		return nil, fmt.Errorf("lane %s is currently blocked by the rotation rule", lane)
+		if !sharesOnly || !n.epochs.isFull() {
+			return nil, fmt.Errorf("lane %s is currently blocked by the rotation rule", lane)
+		}
+		noBlock = true
 	}
 
 	// No work is handed out on a chain that has not reached the checkpoints or the work the
@@ -235,6 +245,7 @@ func (n *Node) Template(lane mh.Lane) (*rpc.Template, error) {
 	root := n.store.CreditsRoot()
 	t.CreditRoot = fmt.Sprintf("%x", root[:])
 	t.TakesShares = n.epochs.isFull()
+	t.NoBlock = noBlock
 	return t, nil
 }
 

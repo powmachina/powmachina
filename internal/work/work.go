@@ -42,6 +42,9 @@ type Template struct {
 	CreditRoot string `json:"credit_root"`
 	// TakesShares: the node takes shares through submitshare (BuildShares).
 	TakesShares bool `json:"takes_shares"`
+	// NoBlock: the lane may not have the next block (the rotation rule) — the job is for
+	// Sharepool shares only, and a hash that meets the block's target is a share too.
+	NoBlock bool `json:"no_block,omitempty"`
 }
 
 // Payout is one output of the coinbase's payouts.
@@ -93,6 +96,8 @@ type Job struct {
 	// and one that also meets BlockTarget is the block (BuildShares). Otherwise Target is the
 	// block's.
 	Shares bool
+	// NoBlock: the lane may not have the next block (Template.NoBlock); every hit is a share.
+	NoBlock bool
 }
 
 // ErrChainAhead: the chain's time is ahead of the clock by more than the node allows — it would refuse the block.
@@ -103,6 +108,9 @@ var ErrChainAhead = errors.New("chain time is ahead of the clock — waiting")
 // commitment, the merkle root, the header. The job looks for a block, the share of the heaviest
 // weight.
 func Build(t *Template, payout []byte, params chain.NetParams) (*Job, error) {
+	if t.NoBlock {
+		return nil, fmt.Errorf("work: lane %s may not have the next block (a template for shares only)", t.Lane)
+	}
 	return build(t, payout, chain.MaxShareWeight, params)
 }
 
@@ -111,6 +119,9 @@ func Build(t *Template, payout []byte, params chain.NetParams) (*Job, error) {
 // takes no shares (Template.TakesShares) gets a job that looks for the block alone.
 func BuildShares(t *Template, payout []byte, weight uint8, params chain.NetParams) (*Job, error) {
 	if !t.TakesShares {
+		if t.NoBlock {
+			return nil, fmt.Errorf("work: lane %s may not have the next block and the node takes no shares", t.Lane)
+		}
 		return Build(t, payout, params)
 	}
 	if weight > chain.MaxShareWeight {
@@ -123,7 +134,7 @@ func BuildShares(t *Template, payout []byte, weight uint8, params chain.NetParam
 	if j.ShareTarget, err = chain.ShareTarget(j.Header.Bits, weight); err != nil {
 		return nil, err
 	}
-	j.Target, j.Shares = j.ShareTarget, true
+	j.Target, j.Shares, j.NoBlock = j.ShareTarget, true, t.NoBlock
 	return j, nil
 }
 

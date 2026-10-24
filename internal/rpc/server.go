@@ -140,6 +140,10 @@ type Template struct {
 	// TakesShares says whether the node takes the miner's shares (submitshare): a node holding
 	// the full DAG does, a light one does not, and the miner then looks for blocks only.
 	TakesShares bool `json:"takes_shares"`
+	// NoBlock: the lane may not have the next block (the rotation rule), so the template is for
+	// Sharepool shares only — a share does not depend on the rotation. Only the node's own stratum
+	// port asks for such a template; gettemplate answers that the lane is blocked.
+	NoBlock bool `json:"no_block,omitempty"`
 }
 
 // Payout is one coinbase payout: the value and the payout program (hex).

@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/big"
 	"net"
 	"strings"
 	"testing"
 
 	"powmachina/internal/chain"
 	"powmachina/internal/mh"
+	"powmachina/internal/work"
 )
 
 // cheapNode is fakeNode with a PoW that costs nothing: the nonces in `good` are blocks and every
@@ -131,5 +133,43 @@ func TestShareForADroppedJobIsStale(t *testing.T) {
 	}
 	if _, e := submitNow(c, jobID, FormatNonce(nonce)); e == nil || e.Code != ErrCodeStale {
 		t.Fatalf("a share for a dropped job: %v", e)
+	}
+}
+
+// A lane the rotation rule blocks still gets work on a node that takes shares: every hit is a
+// Sharepool share, also one at the block's target — nothing is submitted as a block.
+func TestBlockedLaneMinesSharesOnly(t *testing.T) {
+	for _, noBlock := range []bool{false, true} {
+		node := &cheapNode{fakeNode: &fakeNode{tip: chain.RegtestGenesis().ID(), takesShares: true, noBlock: noBlock},
+			good: map[uint64]bool{7: true}}
+		c, job := loggedIn(t, node)
+		res, e := submitNow(c, job, FormatNonce(7))
+		if e != nil {
+			t.Fatalf("noBlock=%v: %v", noBlock, e)
+		}
+		node.mu.Lock()
+		blocks, shares := len(node.blocks), len(node.shares)
+		node.mu.Unlock()
+		if noBlock && (res.Block || blocks != 0 || shares != 1) {
+			t.Fatalf("a blocked lane: block %v, %d blocks, %d shares; want a share only", res.Block, blocks, shares)
+		}
+		if !noBlock && (!res.Block || blocks != 1) {
+			t.Fatalf("an allowed lane: block %v, %d blocks; want the block", res.Block, blocks)
+		}
+	}
+}
+
+// The easiest target a device gets is the lightest Sharepool share on a node that takes shares,
+// and the network's floor on one that does not.
+func TestEasiestTargetFollowsTheSharepool(t *testing.T) {
+	bits := chain.RegtestTargetBits
+	st0, _ := chain.ShareTarget(0x1e00ffff, 0)
+	got := easiestTarget(&work.Template{TakesShares: true}, 0x1e00ffff, chain.TestNet)
+	if got.Cmp(new(big.Int).SetBytes(st0[:])) != 0 {
+		t.Fatalf("a node that takes shares: %x, want the weight-0 share target %x", got, st0)
+	}
+	limit, _ := chain.CompactToTarget(chain.TestNet.PowLimitBits)
+	if got := easiestTarget(&work.Template{}, bits, chain.TestNet); got.Cmp(new(big.Int).SetBytes(limit[:])) != 0 {
+		t.Fatalf("a node that takes no shares: %x, want the network's floor", got)
 	}
 }
