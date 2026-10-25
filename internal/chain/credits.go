@@ -101,14 +101,65 @@ func PayoutNeed(threshold uint8) int64 {
 }
 
 // CreditView reads the credit state a block builds on — the state its parent left.
+//
+// A block touches a few entries of a state that may hold millions, so nothing here walks the
+// whole state: a block reads the entries it changes, the front of the payout queue and the stored
+// nodes of the tree on the paths it changes (credittree.go, creditqueue.go).
 type CreditView interface {
 	Pot() int64
-	// ForEachCredit walks every entry; the order does not matter.
-	ForEachCredit(fn func(payout [32]byte, c Credit) error) error
 	// CreditsRoot is CreditsRoot of this state. A store keeps it next to the state, so a block
 	// is checked against it without walking every entry.
 	CreditsRoot() [32]byte
+	// Credit reads one entry.
+	Credit(payout [32]byte) (Credit, bool, error)
+	// CreditsUnder returns, in the order of the programs, at most `max` entries whose program
+	// starts with the first `depth` bits of `prefix`.
+	CreditsUnder(prefix [32]byte, depth, max int) ([]CreditEntry, error)
+	// CreditNode is the stored hash of the subtree at the first `depth` bits of `prefix`; there is
+	// one exactly when the subtree holds two entries or more.
+	CreditNode(prefix [32]byte, depth int) ([32]byte, bool, error)
+	// PayoutQueue returns, in order, at most `max` entries of the payout queue (CreditQueueAt) that
+	// are due at `height`, and whether those are all of them.
+	PayoutQueue(height uint64, max int) ([]QueueEntry, bool, error)
+	// ExpiredQueue does the same for the keys inactive at `height` (CreditExpiry) whose credit is
+	// not dust; ExpiredDust returns every inactive key whose credit is.
+	ExpiredQueue(height uint64, max int) ([]QueueEntry, bool, error)
+	ExpiredDust(height uint64) ([]QueueEntry, error)
 }
+
+// CreditEntry is one entry of the state.
+type CreditEntry struct {
+	Payout [32]byte
+	Credit Credit
+}
+
+// QueueEntry is a key in one of the queues, at the height it is due from.
+type QueueEntry struct {
+	At     uint64
+	Payout [32]byte
+}
+
+// CreditQueueAt is the height from which a credit that reached its payout may be paid: when it got
+// there, but not within PayoutInterval of the key's last payout. ok is false for a credit that has
+// not reached it. A store keeps its payout queue in this order, the program breaking a tie.
+func CreditQueueAt(c Credit) (uint64, bool) {
+	if c.ReadyAt == 0 {
+		return 0, false
+	}
+	from := c.ReadyAt
+	if c.PaidAt != 0 && c.PaidAt+PayoutInterval+1 > from {
+		from = c.PaidAt + PayoutInterval + 1
+	}
+	return from, true
+}
+
+// CreditExpiry is the height from which a key counts as inactive: InactiveBlocks after its last
+// settled share. Then it is paid what it has above the dust limit, whatever its threshold, and
+// below it its credit returns to the pot (CreditIsDust).
+func CreditExpiry(c Credit) uint64 { return c.LastShare + InactiveBlocks }
+
+// CreditIsDust says whether an inactive key's credit is too small to pay out.
+func CreditIsDust(c Credit) bool { return c.Amount < CreditDust }
 
 // CreditStepResult is what a block does to the credit state.
 type CreditStepResult struct {
@@ -122,6 +173,8 @@ type CreditStepResult struct {
 	Pot int64
 	// Root is the commitment to the state after the block, the one its child's coinbase carries.
 	Root [32]byte
+	// Nodes are the stored nodes of the tree that change with the block (nil = gone).
+	Nodes map[CreditNodeKey]*[32]byte
 }
 
 // creditUnits is what a block settles per payout program: the units, and the threshold of the
@@ -155,16 +208,48 @@ func settledUnits(commit *ShareCommit, s *Settlement) (map[[32]byte]creditUnits,
 	return out, total
 }
 
-func readCredits(v CreditView) (map[[32]byte]Credit, error) {
-	state := make(map[[32]byte]Credit)
-	if err := v.ForEachCredit(func(p [32]byte, c Credit) error {
-		state[p] = c
-		return nil
-	}); err != nil {
+// creditReader reads entries of a view once and remembers them, with what a step has changed on
+// top: nil is an entry the step deleted.
+type creditReader struct {
+	v    CreditView
+	read map[[32]byte]*Credit // as the view has them, nil = none
+	now  map[[32]byte]*Credit // after the step's changes so far
+}
+
+func newCreditReader(v CreditView) *creditReader {
+	return &creditReader{v: v, read: make(map[[32]byte]*Credit), now: make(map[[32]byte]*Credit)}
+}
+
+func (r *creditReader) original(p [32]byte) (*Credit, error) {
+	if c, ok := r.read[p]; ok {
+		return c, nil
+	}
+	c, ok, err := r.v.Credit(p)
+	if err != nil {
 		// Reading the state failed, the block did not: it says nothing about its validity.
 		return nil, errors.Join(ErrSettlementUnchecked, ErrCreditState, err)
 	}
-	return state, nil
+	var out *Credit
+	if ok {
+		out = &c
+	}
+	r.read[p] = out
+	return out, nil
+}
+
+// get is the entry as the step sees it now.
+func (r *creditReader) get(p [32]byte) (*Credit, error) {
+	if c, ok := r.now[p]; ok {
+		return c, nil
+	}
+	return r.original(p)
+}
+
+func stateErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	return errors.Join(ErrSettlementUnchecked, ErrCreditState, err)
 }
 
 // payoutPlan is what the coinbase of the block at `height` pays out of the state: the front of the
@@ -177,58 +262,108 @@ type payoutPlan struct {
 	dust     [][32]byte
 }
 
-func planPayouts(height uint64, state map[[32]byte]Credit) payoutPlan {
-	type queued struct {
-		payout   [32]byte
-		from     uint64
-		inactive bool
+// planPayouts takes the keys in the order they became payable — a key that reached its payout
+// at CreditQueueAt, an inactive one at CreditExpiry — and pays from the front for as long as
+// MaxPayoutsPerBlock and the coinbase's storage mass reserve last. It reads only the front of
+// the two queues; when it needs more of them than it read, it reads again, more.
+func planPayouts(height uint64, r *creditReader) (payoutPlan, error) {
+	dust, err := r.v.ExpiredDust(height)
+	if err != nil {
+		return payoutPlan{}, stateErr(err)
 	}
+	for n := 64; ; n *= 8 {
+		ready, readyAll, err := r.v.PayoutQueue(height, n)
+		if err != nil {
+			return payoutPlan{}, stateErr(err)
+		}
+		expired, expiredAll, err := r.v.ExpiredQueue(height, n)
+		if err != nil {
+			return payoutPlan{}, stateErr(err)
+		}
+		plan, short, err := mergePayouts(height, r, ready, readyAll, expired, expiredAll)
+		if err != nil {
+			return payoutPlan{}, err
+		}
+		if !short {
+			for _, d := range dust {
+				plan.dust = append(plan.dust, d.Payout)
+			}
+			return plan, nil
+		}
+	}
+}
+
+func queueLess(a, b QueueEntry) bool {
+	if a.At != b.At {
+		return a.At < b.At
+	}
+	return bytes.Compare(a.Payout[:], b.Payout[:]) < 0
+}
+
+// mergePayouts walks the two queues as one; short says it ran out of an incomplete one.
+func mergePayouts(height uint64, r *creditReader, ready []QueueEntry, readyAll bool,
+	expired []QueueEntry, expiredAll bool) (payoutPlan, bool, error) {
 	var plan payoutPlan
-	var queue []queued
-	for p, c := range state {
-		if c.LastShare+InactiveBlocks <= height {
-			if c.Amount >= CreditDust {
-				queue = append(queue, queued{p, c.LastShare + InactiveBlocks, true})
-			} else {
-				plan.dust = append(plan.dust, p)
-			}
-			continue
-		}
-		if c.ReadyAt == 0 || (c.PaidAt != 0 && height <= c.PaidAt+PayoutInterval) {
-			continue
-		}
-		from := c.ReadyAt
-		if c.PaidAt != 0 && c.PaidAt+PayoutInterval+1 > from {
-			from = c.PaidAt + PayoutInterval + 1
-		}
-		queue = append(queue, queued{p, from, false})
-	}
-	slices.SortFunc(queue, func(a, b queued) int {
-		if a.from != b.from {
-			if a.from < b.from {
-				return -1
-			}
-			return 1
-		}
-		return bytes.Compare(a.payout[:], b.payout[:])
-	})
 	budget := CoinbaseStorageMassReserve
 	if dev := DevFee(height); dev > 0 {
 		budget -= StorageMassC / uint64(dev)
 	}
-	for _, q := range queue {
-		amount := state[q.payout].Amount
-		mass := StorageMassC / uint64(amount)
-		if len(plan.payouts) == MaxPayoutsPerBlock || mass > budget {
+	i, j := 0, 0
+	for len(plan.payouts) < MaxPayoutsPerBlock {
+		// The next key of the payout queue that is not inactive: an inactive key is paid from the
+		// other queue, by its expiry.
+		var next *QueueEntry
+		var nextC *Credit
+		for next == nil && i < len(ready) {
+			c, err := r.original(ready[i].Payout)
+			if err != nil {
+				return plan, false, err
+			}
+			if c == nil {
+				return plan, false, stateErr(errors.New("the payout queue names a key without a credit"))
+			}
+			if CreditExpiry(*c) <= height {
+				i++
+				continue
+			}
+			next, nextC = &ready[i], c
+		}
+		if next == nil && !readyAll {
+			return plan, true, nil
+		}
+		if j >= len(expired) && !expiredAll {
+			return plan, true, nil
+		}
+		inactive := false
+		if j < len(expired) && (next == nil || queueLess(expired[j], *next)) {
+			c, err := r.original(expired[j].Payout)
+			if err != nil {
+				return plan, false, err
+			}
+			if c == nil {
+				return plan, false, stateErr(errors.New("the expiry queue names a key without a credit"))
+			}
+			next, nextC, inactive = &expired[j], c, true
+		}
+		if next == nil {
+			break // both queues are empty
+		}
+		mass := StorageMassC / uint64(nextC.Amount)
+		if mass > budget {
 			break
 		}
 		budget -= mass
-		plan.payouts = append(plan.payouts, TxOut{Value: amount, ScriptVersion: ScriptVersionBasic,
-			Script: append([]byte(nil), q.payout[:]...)})
-		plan.paid = append(plan.paid, q.payout)
-		plan.inactive = append(plan.inactive, q.inactive)
+		plan.payouts = append(plan.payouts, TxOut{Value: nextC.Amount, ScriptVersion: ScriptVersionBasic,
+			Script: append([]byte(nil), next.Payout[:]...)})
+		plan.paid = append(plan.paid, next.Payout)
+		plan.inactive = append(plan.inactive, inactive)
+		if inactive {
+			j++
+		} else {
+			i++
+		}
 	}
-	return plan
+	return plan, false, nil
 }
 
 // CreditPayouts are the outputs the coinbase of the block at `height` must pay after the dev fee,
@@ -236,11 +371,11 @@ func planPayouts(height uint64, state map[[32]byte]Credit) payoutPlan {
 // The credits that became payable first go first, a tie broken by the payout program; the coinbase
 // pays for as long as MaxPayoutsPerBlock and the storage mass reserve last.
 func CreditPayouts(height uint64, v CreditView) ([]TxOut, error) {
-	state, err := readCredits(v)
+	plan, err := planPayouts(height, newCreditReader(v))
 	if err != nil {
 		return nil, err
 	}
-	return planPayouts(height, state).payouts, nil
+	return plan.payouts, nil
 }
 
 // CreditStep is the one implementation of what a block at `height`, with its own share `commit`,
@@ -250,42 +385,39 @@ func CreditPayouts(height uint64, v CreditView) ([]TxOut, error) {
 //  2. inactive keys below the dust limit return their credit to the pot,
 //  3. the block's reward less the dev fee, and its fees, go into the pot,
 //  4. every share unit the block settles is credited pot / PotPriceDivisor, taken from the pot.
+//
+// It reads only what it changes, and the root after it from the tree's stored nodes.
 func CreditStep(height uint64, commit *ShareCommit, s *Settlement, fees int64, v CreditView) (*CreditStepResult, error) {
-	state, err := readCredits(v)
+	r := newCreditReader(v)
+	pot := v.Pot()
+
+	// 1 + 2.
+	plan, err := planPayouts(height, r)
 	if err != nil {
 		return nil, err
 	}
-	before := make(map[[32]byte]*Credit)
-	pot := v.Pot()
-	changed := make(map[[32]byte]bool)
-	touch := func(p [32]byte) {
-		if changed[p] {
-			return
-		}
-		changed[p] = true
-		if c, ok := state[p]; ok {
-			before[p] = &c
-		} else {
-			before[p] = nil
-		}
-	}
-
-	// 1 + 2.
-	plan := planPayouts(height, state)
 	for _, p := range plan.dust {
-		touch(p)
-		pot += state[p].Amount
-		delete(state, p)
+		c, err := r.get(p)
+		if err != nil {
+			return nil, err
+		}
+		if c != nil {
+			pot += c.Amount
+		}
+		r.now[p] = nil
 	}
 	for i, p := range plan.paid {
-		touch(p)
 		if plan.inactive[i] {
-			delete(state, p)
+			r.now[p] = nil
 			continue
 		}
-		c := state[p]
-		c.Amount, c.PaidAt, c.ReadyAt = 0, height, 0
-		state[p] = c
+		c, err := r.get(p)
+		if err != nil {
+			return nil, err
+		}
+		paid := *c
+		paid.Amount, paid.PaidAt, paid.ReadyAt = 0, height, 0
+		r.now[p] = &paid
 	}
 	payouts := plan.payouts
 
@@ -309,8 +441,14 @@ func CreditStep(height uint64, commit *ShareCommit, s *Settlement, fees int64, v
 			credit = int64(q)
 		}
 		pot -= credit
-		touch(p)
-		c := state[p]
+		cur, err := r.get(p)
+		if err != nil {
+			return nil, err
+		}
+		var c Credit
+		if cur != nil {
+			c = *cur
+		}
 		c.Amount += credit
 		c.LastShare = height
 		c.Threshold = u.threshold
@@ -321,19 +459,28 @@ func CreditStep(height uint64, commit *ShareCommit, s *Settlement, fees int64, v
 		} else {
 			c.ReadyAt = 0
 		}
-		state[p] = c
+		r.now[p] = &c
 	}
 
-	res := &CreditStepResult{Payouts: payouts, Changed: make(map[[32]byte]*Credit, len(changed)),
-		Before: before, Pot: pot}
-	for p := range changed {
-		if c, ok := state[p]; ok {
-			res.Changed[p] = &c
-		} else {
-			res.Changed[p] = nil
+	res := &CreditStepResult{Payouts: payouts, Changed: make(map[[32]byte]*Credit, len(r.now)),
+		Before: make(map[[32]byte]*Credit, len(r.now)), Pot: pot}
+	for p, c := range r.now {
+		orig, err := r.original(p)
+		if err != nil {
+			return nil, err
 		}
+		if c == nil && orig == nil {
+			continue // created and deleted within the block — never there
+		}
+		res.Changed[p] = c
+		res.Before[p] = orig
 	}
-	res.Root = CreditsRoot(pot, state)
+	tree, nodes, err := creditTreeUpdate(v, res.Changed)
+	if err != nil {
+		return nil, err
+	}
+	res.Nodes = nodes
+	res.Root = creditsRootFromTree(pot, tree)
 	return res, nil
 }
 
@@ -380,6 +527,13 @@ func CreditNode(left, right [32]byte) [32]byte {
 
 // creditSubtree is the root over sorted keys that agree on their first `depth` bits.
 func creditSubtree(keys [][32]byte, leaves [][32]byte, depth int) [32]byte {
+	return creditSubtreeEmit(keys, leaves, depth, [32]byte{}, nil)
+}
+
+// creditSubtreeEmit is creditSubtree that also hands every inner node to `emit` (nil = nobody):
+// the nodes a store keeps (credittree.go). `prefix` is the keys' first `depth` bits.
+func creditSubtreeEmit(keys [][32]byte, leaves [][32]byte, depth int, prefix [32]byte,
+	emit func(CreditNodeKey, [32]byte)) [32]byte {
 	switch len(keys) {
 	case 0:
 		return [32]byte{}
@@ -393,6 +547,10 @@ func creditSubtree(keys [][32]byte, leaves [][32]byte, depth int) [32]byte {
 		}
 		return 1
 	})
-	return CreditNode(creditSubtree(keys[:split], leaves[:split], depth+1),
-		creditSubtree(keys[split:], leaves[split:], depth+1))
+	h := CreditNode(creditSubtreeEmit(keys[:split], leaves[:split], depth+1, prefix, emit),
+		creditSubtreeEmit(keys[split:], leaves[split:], depth+1, withCreditBit(prefix, depth), emit))
+	if emit != nil {
+		emit(CreditNodeKey{uint8(depth), prefix}, h)
+	}
+	return h
 }

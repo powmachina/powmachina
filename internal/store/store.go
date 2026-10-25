@@ -53,7 +53,13 @@ const (
 	prefixRich    byte = 0x09 // <inverted balance:8 BE><script hash:32> -> ∅ (the rich list)
 	prefixInvalid byte = 0x0A // <id:32>            -> ∅ (a block that failed validation)
 	prefixCredit  byte = 0x0B // <payout:32>        -> chain.Credit (the Sharepool's credit state)
-	prefixMeta    byte = 0xFF // the meta keys below
+	// The credit state's indexes (credits.go): the stored nodes of its tree, its payout queue and
+	// the keys by the height they go inactive, the dust apart.
+	prefixCreditNode   byte = 0x0C // <depth:1><prefix:32>        -> the subtree's hash
+	prefixCreditQueue  byte = 0x0D // <from:8 BE><payout:32>      -> ∅
+	prefixCreditExpiry byte = 0x0E // <expiry:8 BE><payout:32>    -> ∅ (the credit is not dust)
+	prefixCreditDust   byte = 0x0F // <expiry:8 BE><payout:32>    -> ∅ (the credit is dust)
+	prefixMeta         byte = 0xFF // the meta keys below
 )
 
 var (
@@ -72,6 +78,9 @@ var (
 	// reindex is started at startup — an index covering only part of the history would return "not
 	// found" for older transactions, and that looks like a valid answer.
 	keyTxIndexed = []byte{prefixMeta, 't', 'x', 'i', 'd', 'x'}
+	// keyCreditIndexed is the mark that the credit state's indexes cover it. A directory from
+	// before them builds them once when it opens (ensureCreditIndex).
+	keyCreditIndexed = []byte{prefixMeta, 'c', 'i', 'd', 'x'}
 	// keyAddrIndexed is the same mark for the address index.
 	keyAddrIndexed = []byte{prefixMeta, 'a', 'd', 'i', 'd', 'x'}
 )
@@ -117,6 +126,10 @@ func OpenWith(dir string, opt Options) (*Store, error) {
 	}
 	s := &Store{db: db, indexTx: opt.TxIndex, indexAddr: opt.AddrIndex}
 	if err := s.checkSchema(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := s.ensureCreditIndex(); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -204,6 +217,10 @@ func OpenMemWith(opt Options) (*Store, error) {
 	}
 	s := &Store{db: db, indexTx: opt.TxIndex, indexAddr: opt.AddrIndex}
 	if err := s.checkSchema(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := s.ensureCreditIndex(); err != nil {
 		db.Close()
 		return nil, err
 	}

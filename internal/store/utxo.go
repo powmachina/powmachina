@@ -387,7 +387,7 @@ func (s *Store) RevertTip() error {
 		return err
 	}
 
-	batch := s.db.NewBatch()
+	batch := s.db.NewIndexedBatch()
 	defer batch.Close()
 
 	// The spent coins first, the created ones after — the order chain.UTXOSet.Undo explains: an

@@ -11,15 +11,37 @@ type creditState struct {
 	credits map[[32]byte]Credit
 }
 
+// view is the state as a CreditView, its tree built from scratch: slow, and the reference the
+// stored tree is checked against.
+func (s *creditState) view() *memCredits {
+	entries := make([]CreditEntry, 0, len(s.credits))
+	for p, c := range s.credits {
+		entries = append(entries, CreditEntry{p, c})
+	}
+	nodes := CreditTreeNodes(entries)
+	return &memCredits{credits: s.credits, nodes: nodes, pot: s.pot, root: CreditsRoot(s.pot, s.credits)}
+}
+
 func (s *creditState) Pot() int64            { return s.pot }
 func (s *creditState) CreditsRoot() [32]byte { return CreditsRoot(s.pot, s.credits) }
-func (s *creditState) ForEachCredit(fn func([32]byte, Credit) error) error {
-	for p, c := range s.credits {
-		if err := fn(p, c); err != nil {
-			return err
-		}
-	}
-	return nil
+func (s *creditState) Credit(p [32]byte) (Credit, bool, error) {
+	c, ok := s.credits[p]
+	return c, ok, nil
+}
+func (s *creditState) CreditsUnder(prefix [32]byte, depth, max int) ([]CreditEntry, error) {
+	return s.view().CreditsUnder(prefix, depth, max)
+}
+func (s *creditState) CreditNode(prefix [32]byte, depth int) ([32]byte, bool, error) {
+	return s.view().CreditNode(prefix, depth)
+}
+func (s *creditState) PayoutQueue(height uint64, max int) ([]QueueEntry, bool, error) {
+	return s.view().PayoutQueue(height, max)
+}
+func (s *creditState) ExpiredQueue(height uint64, max int) ([]QueueEntry, bool, error) {
+	return s.view().ExpiredQueue(height, max)
+}
+func (s *creditState) ExpiredDust(height uint64) ([]QueueEntry, error) {
+	return s.view().ExpiredDust(height)
 }
 
 // apply moves the state by a step, the way a store does.
@@ -276,4 +298,13 @@ func TestUTXOSetCarriesTheCredits(t *testing.T) {
 	if paid != 2 {
 		t.Fatalf("%d payouts in three blocks, expected 2", paid)
 	}
+}
+
+func (s *creditState) ForEachCredit(fn func([32]byte, Credit) error) error {
+	for p, c := range s.credits {
+		if err := fn(p, c); err != nil {
+			return err
+		}
+	}
+	return nil
 }

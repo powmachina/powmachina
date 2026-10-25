@@ -78,6 +78,125 @@ func forEachCredit(r creditIterable, fn func([32]byte, chain.Credit) error) erro
 	return it.Error()
 }
 
+func keyCreditNode(k chain.CreditNodeKey) []byte {
+	b := make([]byte, 2+32)
+	b[0], b[1] = prefixCreditNode, k.Depth
+	copy(b[2:], k.Prefix[:])
+	return b
+}
+
+func keyCreditAt(prefix byte, at uint64, payout [32]byte) []byte {
+	b := make([]byte, 1+8+32)
+	b[0] = prefix
+	binary.BigEndian.PutUint64(b[1:9], at)
+	copy(b[9:], payout[:])
+	return b
+}
+
+// creditIndexKeys are the index entries a credit has: its place in the payout queue, if it reached
+// its payout, and its expiry, in the dust space or the other.
+func creditIndexKeys(p [32]byte, c chain.Credit) [][]byte {
+	var out [][]byte
+	if from, ok := chain.CreditQueueAt(c); ok {
+		out = append(out, keyCreditAt(prefixCreditQueue, from, p))
+	}
+	space := prefixCreditExpiry
+	if chain.CreditIsDust(c) {
+		space = prefixCreditDust
+	}
+	return append(out, keyCreditAt(space, chain.CreditExpiry(c), p))
+}
+
+// creditReader is what the credit reads need: the database or a batch that sees its own writes.
+type creditReader interface {
+	potReader
+	creditIterable
+}
+
+func readCredit(r creditReader, p [32]byte) (chain.Credit, bool, error) {
+	v, closer, err := r.Get(keyCredit(p))
+	if errors.Is(err, pebble.ErrNotFound) {
+		return chain.Credit{}, false, nil
+	}
+	if err != nil {
+		return chain.Credit{}, false, fmt.Errorf("store: %w", err)
+	}
+	defer closer.Close()
+	c, err := chain.DeserializeCredit(v)
+	if err != nil {
+		return chain.Credit{}, false, fmt.Errorf("store: the credit of %x is corrupted: %w", p[:6], err)
+	}
+	return c, true, nil
+}
+
+func creditsUnder(r creditReader, prefix [32]byte, depth, max int) ([]chain.CreditEntry, error) {
+	lo, hi := chain.CreditPrefixRange(prefix, depth)
+	upper := append(keyCredit(hi), 0) // just past hi
+	it, err := r.NewIter(&pebble.IterOptions{LowerBound: keyCredit(lo), UpperBound: upper})
+	if err != nil {
+		return nil, fmt.Errorf("store: %w", err)
+	}
+	defer it.Close()
+	var out []chain.CreditEntry
+	for it.First(); it.Valid() && len(out) < max; it.Next() {
+		var p [32]byte
+		copy(p[:], it.Key()[1:])
+		c, err := chain.DeserializeCredit(it.Value())
+		if err != nil {
+			return nil, fmt.Errorf("store: the credit of %x is corrupted: %w", p[:6], err)
+		}
+		out = append(out, chain.CreditEntry{Payout: p, Credit: c})
+	}
+	return out, it.Error()
+}
+
+func creditNode(r creditReader, prefix [32]byte, depth int) ([32]byte, bool, error) {
+	v, closer, err := r.Get(keyCreditNode(chain.CreditNodeKey{Depth: uint8(depth), Prefix: prefix}))
+	if errors.Is(err, pebble.ErrNotFound) {
+		return [32]byte{}, false, nil
+	}
+	if err != nil {
+		return [32]byte{}, false, fmt.Errorf("store: %w", err)
+	}
+	defer closer.Close()
+	if len(v) != 32 {
+		return [32]byte{}, false, fmt.Errorf("store: a corrupted credit node (%d B)", len(v))
+	}
+	var h [32]byte
+	copy(h[:], v)
+	return h, true, nil
+}
+
+// creditQueue reads, in order, at most `max` entries of an index space due at `height` (max < 0:
+// all of them), and whether those are all.
+func creditQueue(r creditReader, space byte, height uint64, max int) ([]chain.QueueEntry, bool, error) {
+	upper := keyCreditAt(space, height, [32]byte{})
+	if height == ^uint64(0) {
+		upper = []byte{space + 1}
+	} else {
+		binary.BigEndian.PutUint64(upper[1:9], height+1)
+	}
+	it, err := r.NewIter(&pebble.IterOptions{LowerBound: []byte{space}, UpperBound: upper})
+	if err != nil {
+		return nil, false, fmt.Errorf("store: %w", err)
+	}
+	defer it.Close()
+	var out []chain.QueueEntry
+	for it.First(); it.Valid(); it.Next() {
+		if max >= 0 && len(out) == max {
+			return out, false, it.Error()
+		}
+		k := it.Key()
+		if len(k) != 1+8+32 {
+			return nil, false, fmt.Errorf("store: a corrupted credit index key (%d B)", len(k))
+		}
+		e := chain.QueueEntry{At: binary.BigEndian.Uint64(k[1:9])}
+		copy(e.Payout[:], k[9:])
+		out = append(out, e)
+	}
+	return out, true, it.Error()
+}
+
 // Pot is the pot of the applied tip's credit state. A read error answers 0; CreditsRoot then
 // answers a root no block carries, so a block is refused for it rather than accepted.
 func (s *Store) Pot() int64 {
@@ -94,22 +213,34 @@ func (s *Store) CreditsRoot() [32]byte {
 	return root
 }
 
-// ForEachCredit walks the credit state of the applied tip.
+// ForEachCredit walks the credit state of the applied tip — for RPC and the metrics, never for a
+// block.
 func (s *Store) ForEachCredit(fn func([32]byte, chain.Credit) error) error {
 	return forEachCredit(s.db, fn)
 }
 
 // Credit reads one payout program's entry.
-func (s *Store) Credit(payout [32]byte) (chain.Credit, bool, error) {
-	v, err := s.get(keyCredit(payout))
-	if errors.Is(err, ErrNotFound) {
-		return chain.Credit{}, false, nil
-	}
-	if err != nil {
-		return chain.Credit{}, false, err
-	}
-	c, err := chain.DeserializeCredit(v)
-	return c, err == nil, err
+func (s *Store) Credit(payout [32]byte) (chain.Credit, bool, error) { return readCredit(s.db, payout) }
+
+func (s *Store) CreditsUnder(prefix [32]byte, depth, max int) ([]chain.CreditEntry, error) {
+	return creditsUnder(s.db, prefix, depth, max)
+}
+
+func (s *Store) CreditNode(prefix [32]byte, depth int) ([32]byte, bool, error) {
+	return creditNode(s.db, prefix, depth)
+}
+
+func (s *Store) PayoutQueue(height uint64, max int) ([]chain.QueueEntry, bool, error) {
+	return creditQueue(s.db, prefixCreditQueue, height, max)
+}
+
+func (s *Store) ExpiredQueue(height uint64, max int) ([]chain.QueueEntry, bool, error) {
+	return creditQueue(s.db, prefixCreditExpiry, height, max)
+}
+
+func (s *Store) ExpiredDust(height uint64) ([]chain.QueueEntry, error) {
+	out, _, err := creditQueue(s.db, prefixCreditDust, height, -1)
+	return out, err
 }
 
 func (p *pebbleBatch) Pot() int64 {
@@ -128,38 +259,126 @@ func (p *pebbleBatch) CreditsRoot() [32]byte {
 	return root
 }
 
-func (p *pebbleBatch) ForEachCredit(fn func([32]byte, chain.Credit) error) error {
-	return forEachCredit(p.b, fn)
+func (p *pebbleBatch) Credit(payout [32]byte) (chain.Credit, bool, error) {
+	return readCredit(p.b, payout)
 }
 
-func (p *pebbleBatch) PutCredit(payout [32]byte, c *chain.Credit) {
-	var err error
-	if c == nil {
-		err = p.b.Delete(keyCredit(payout), nil)
-	} else {
-		ser := c.Serialize()
-		err = p.b.Set(keyCredit(payout), ser[:], nil)
-	}
+func (p *pebbleBatch) CreditsUnder(prefix [32]byte, depth, max int) ([]chain.CreditEntry, error) {
+	return creditsUnder(p.b, prefix, depth, max)
+}
+
+func (p *pebbleBatch) CreditNode(prefix [32]byte, depth int) ([32]byte, bool, error) {
+	return creditNode(p.b, prefix, depth)
+}
+
+func (p *pebbleBatch) PayoutQueue(height uint64, max int) ([]chain.QueueEntry, bool, error) {
+	return creditQueue(p.b, prefixCreditQueue, height, max)
+}
+
+func (p *pebbleBatch) ExpiredQueue(height uint64, max int) ([]chain.QueueEntry, bool, error) {
+	return creditQueue(p.b, prefixCreditExpiry, height, max)
+}
+
+func (p *pebbleBatch) ExpiredDust(height uint64) ([]chain.QueueEntry, error) {
+	out, _, err := creditQueue(p.b, prefixCreditDust, height, -1)
+	return out, err
+}
+
+func (p *pebbleBatch) fail(err error) {
 	if err != nil && p.err == nil {
 		p.err = err
 	}
 }
 
-func (p *pebbleBatch) PutPot(pot int64, root [32]byte) {
-	if err := p.b.Set(keyPot, encodePot(pot, root), nil); err != nil && p.err == nil {
-		p.err = err
+// PutCredit writes an entry and moves its index entries with it.
+func (p *pebbleBatch) PutCredit(payout [32]byte, c *chain.Credit) {
+	old, had, err := readCredit(p.b, payout)
+	if err != nil {
+		p.fail(err)
+		return
 	}
+	if had {
+		for _, k := range creditIndexKeys(payout, old) {
+			p.fail(p.b.Delete(k, nil))
+		}
+	}
+	if c == nil {
+		p.fail(p.b.Delete(keyCredit(payout), nil))
+		return
+	}
+	ser := c.Serialize()
+	p.fail(p.b.Set(keyCredit(payout), ser[:], nil))
+	for _, k := range creditIndexKeys(payout, *c) {
+		p.fail(p.b.Set(k, nil, nil))
+	}
+}
+
+func (p *pebbleBatch) PutCreditNode(k chain.CreditNodeKey, h *[32]byte) {
+	if h == nil {
+		p.fail(p.b.Delete(keyCreditNode(k), nil))
+	} else {
+		p.fail(p.b.Set(keyCreditNode(k), h[:], nil))
+	}
+}
+
+func (p *pebbleBatch) PutPot(pot int64, root [32]byte) {
+	p.fail(p.b.Set(keyPot, encodePot(pot, root), nil))
 }
 
 // revertCredits writes the credit state from before a block back into a batch.
 func revertCredits(batch *pebble.Batch, undo *chain.BlockUndo) error {
-	if undo.Height == 0 {
-		return nil // the genesis changed no credits
-	}
 	pb := &pebbleBatch{b: batch}
-	for p, c := range undo.Credits {
-		pb.PutCredit(p, c)
+	if err := chain.RevertCredits(pb, undo); err != nil {
+		return err
 	}
-	pb.PutPot(undo.Pot, undo.CreditsRoot)
 	return pb.err
+}
+
+// ensureCreditIndex builds the credit state's indexes and its tree once, for a directory from
+// before them, and checks the tree against the root the state carries.
+func (s *Store) ensureCreditIndex() error {
+	if _, err := s.get(keyCreditIndexed); err == nil {
+		return nil
+	} else if !errors.Is(err, ErrNotFound) {
+		return err
+	}
+	batch := s.db.NewBatch()
+	defer batch.Close()
+	for _, space := range []byte{prefixCreditNode, prefixCreditQueue, prefixCreditExpiry, prefixCreditDust} {
+		if err := batch.DeleteRange([]byte{space}, []byte{space + 1}, nil); err != nil {
+			return fmt.Errorf("store: %w", err)
+		}
+	}
+	var entries []chain.CreditEntry
+	if err := forEachCredit(s.db, func(p [32]byte, c chain.Credit) error {
+		entries = append(entries, chain.CreditEntry{Payout: p, Credit: c})
+		for _, k := range creditIndexKeys(p, c) {
+			if err := batch.Set(k, nil, nil); err != nil {
+				return fmt.Errorf("store: %w", err)
+			}
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	pot, root, err := readPot(s.db)
+	if err != nil {
+		return err
+	}
+	state := make(map[[32]byte]chain.Credit, len(entries))
+	for _, e := range entries {
+		state[e.Payout] = e.Credit
+	}
+	if got := chain.CreditsRoot(pot, state); got != root {
+		return fmt.Errorf("store: the credit state does not match its root (%x, stored %x)", got[:6], root[:6])
+	}
+	for k, h := range chain.CreditTreeNodes(entries) {
+		if err := batch.Set(keyCreditNode(k), h[:], nil); err != nil {
+			return fmt.Errorf("store: %w", err)
+		}
+	}
+	if err := batch.Set(keyCreditIndexed, []byte{1}, nil); err != nil {
+		return fmt.Errorf("store: %w", err)
+	}
+	return batch.Commit(pebble.Sync)
 }

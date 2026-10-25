@@ -627,12 +627,41 @@ type checkedCoins struct {
 func (c *checkedCoins) Pot() int64            { return c.s.Pot() }
 func (c *checkedCoins) CreditsRoot() [32]byte { return c.s.CreditsRoot() }
 
-func (c *checkedCoins) ForEachCredit(fn func([32]byte, chain.Credit) error) error {
-	err := c.s.ForEachCredit(fn)
+func (c *checkedCoins) note(err error) error {
 	if err != nil && c.err == nil {
 		c.err = err
 	}
 	return err
+}
+
+func (c *checkedCoins) Credit(p [32]byte) (chain.Credit, bool, error) {
+	cr, ok, err := c.s.Credit(p)
+	return cr, ok, c.note(err)
+}
+
+func (c *checkedCoins) CreditsUnder(prefix [32]byte, depth, max int) ([]chain.CreditEntry, error) {
+	out, err := c.s.CreditsUnder(prefix, depth, max)
+	return out, c.note(err)
+}
+
+func (c *checkedCoins) CreditNode(prefix [32]byte, depth int) ([32]byte, bool, error) {
+	h, ok, err := c.s.CreditNode(prefix, depth)
+	return h, ok, c.note(err)
+}
+
+func (c *checkedCoins) PayoutQueue(height uint64, max int) ([]chain.QueueEntry, bool, error) {
+	out, all, err := c.s.PayoutQueue(height, max)
+	return out, all, c.note(err)
+}
+
+func (c *checkedCoins) ExpiredQueue(height uint64, max int) ([]chain.QueueEntry, bool, error) {
+	out, all, err := c.s.ExpiredQueue(height, max)
+	return out, all, c.note(err)
+}
+
+func (c *checkedCoins) ExpiredDust(height uint64) ([]chain.QueueEntry, error) {
+	out, err := c.s.ExpiredDust(height)
+	return out, c.note(err)
 }
 
 func (c *checkedCoins) Get(op chain.Outpoint) (chain.Coin, bool) {
