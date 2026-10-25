@@ -51,7 +51,7 @@ func main() {
 	blockSrc := flag.String("blocksource", "", "HTTP mirrors of block bodies, comma separated — a sync accelerator, not an authority (bodies are verified anyway)")
 	serveBlocks := flag.String("serve-blocks", "", "address to mirror block bodies on over HTTP (opt-in)")
 	serveBudget := flag.Int64("serve-budget-mib", 10240, "how many MiB the HTTP mirror may send (0 = no limit)")
-	dag := flag.String("dag", "auto", "DAG for verifying lane G: auto (full while syncing, light at the tip), full (~1 GiB+, miner), light (~26 MiB, slower first sync)")
+	dag := flag.String("dag", "auto", "DAG for verifying lane G: auto (full while syncing when ~6 GiB of memory is available, light at the tip), full (~1 GiB+, miner), light (~26 MiB, slower first sync)")
 	banList := flag.String("banlist", "", "file the node writes banned IPs into for the firewall (one IP or /64 per line)")
 	geoipPath := flag.String("geoip", "", "DB-IP country CSV (.csv or .csv.gz) for the SharePool map of where shares come from; empty = off")
 	geoipIgnore := flag.String("geoip-ignore", "", "addresses or networks of the network's own nodes, comma separated: shares they relay here are not counted on the map (they were counted where they came in)")
@@ -162,6 +162,8 @@ func runNode(params chain.NetParams, listenAddr, connectAddr, rpcAddr, stratumAd
 	}
 
 	node.SetBanListPath(banList)
+	avail, known := availableMemory()
+	dag = dagModeFor(dag, avail, known)
 	node.SetDagMode(dag)
 	if geoipPath != "" {
 		db, err := geoip.Load(geoipPath)

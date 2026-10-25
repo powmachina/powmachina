@@ -30,7 +30,8 @@ work on the blocks it is handed. The node runs without `-listen` (outbound conne
 so it needs no firewall hole.
 
 `-dag=auto` is the default: while catching up it builds the full DAG (~1 GiB, 0.62 ms per
-header) and drops to light at the tip (26 MiB, 63 ms). `POWM_DAG=light` stays frugal the
+header; with RandomX's dataset the node peaks at ~4.7 GiB) and drops to light at the tip (26 MiB,
+63 ms). With less than 6 GiB of memory available it stays light from the start. `POWM_DAG=light` stays frugal the
 whole time, at the price of a slower first sync. `POWM_NODE=host:port` skips the bundled node
 and uses an existing one (then `POWM_RPC_TOKEN` is required).
 
