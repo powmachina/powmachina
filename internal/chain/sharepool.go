@@ -65,11 +65,17 @@ type ShareTally struct {
 }
 
 // Tally sums the pool by payout program.
-func (p *SharePool) Tally() map[[32]byte]ShareTally {
+func (p *SharePool) Tally() map[[32]byte]ShareTally { return p.TallyWhere(nil) }
+
+// TallyWhere sums the shares `keep` says yes to (by id and parent; nil keeps all) by payout program.
+func (p *SharePool) TallyWhere(keep func(id, prev [32]byte) bool) map[[32]byte]ShareTally {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	out := make(map[[32]byte]ShareTally)
-	for _, ps := range p.shares {
+	for id, ps := range p.shares {
+		if keep != nil && !keep(id, ps.share.Header.PrevBlock) {
+			continue
+		}
 		t := out[ps.share.Commit.Payout]
 		t.Shares++
 		t.Units += ps.share.Commit.Units()

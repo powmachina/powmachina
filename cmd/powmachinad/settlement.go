@@ -192,8 +192,27 @@ func (n *Node) acceptShare(s *chain.Share, from, origin string) (err error) {
 }
 
 // SharePool sums the share pool for RPC getsharepool.
+//
+// It is what the next blocks may still settle: the shares on the applied tip's branch that no
+// block of it has settled yet. The pool itself keeps a settled share until it expires (8 blocks,
+// for the votes between siblings), so a tally of the whole pool barely moved when a block paid
+// half of it, and the website's live view took the rest for new shares at every block.
 func (n *Node) SharePool() (bool, map[[32]byte]chain.ShareTally) {
-	return n.epochs.isFull(), n.shares.Tally()
+	full := n.epochs.isFull()
+	n.applyMu.RLock()
+	defer n.applyMu.RUnlock()
+	st, err := n.store.Tip()
+	if err != nil {
+		return full, n.shares.Tally()
+	}
+	branch := n.shareBranch(st.ID)
+	settled, err := n.settledBelow(st.ID)
+	if err != nil {
+		return full, n.shares.Tally()
+	}
+	return full, n.shares.TallyWhere(func(id, prev [32]byte) bool {
+		return branch[prev] && !branch[id] && !settled(id)
+	})
 }
 
 // Credits is the credit state of the applied tip, for getcredits.
@@ -238,9 +257,9 @@ func (n *Node) submitShare(s *chain.Share, origin string) (bool, error) {
 	return mh.MeetsTarget(&hash, &target), nil
 }
 
-// templateSettlement is the settlement body for the next block on the tip: the shares in the pool
-// built on the tip or the blocks below it within the expiry, that none of them settled yet.
-func (n *Node) templateSettlement(tipID [32]byte, tipHeight uint64) (*chain.Settlement, error) {
+// shareBranch is the tip and the blocks below it within the expiry: the parents a share may have to
+// be settled on top of the tip.
+func (n *Node) shareBranch(tipID [32]byte) map[[32]byte]bool {
 	branch := make(map[[32]byte]bool, chain.ShareExpiry)
 	id := tipID
 	for d := 1; d <= chain.ShareExpiry; d++ {
@@ -254,6 +273,13 @@ func (n *Node) templateSettlement(tipID [32]byte, tipHeight uint64) (*chain.Sett
 		}
 		id = h.PrevBlock
 	}
+	return branch
+}
+
+// templateSettlement is the settlement body for the next block on the tip: the shares in the pool
+// built on the tip or the blocks below it within the expiry, that none of them settled yet.
+func (n *Node) templateSettlement(tipID [32]byte, tipHeight uint64) (*chain.Settlement, error) {
+	branch := n.shareBranch(tipID)
 	settled, err := n.settledBelow(tipID)
 	if err != nil {
 		return nil, err

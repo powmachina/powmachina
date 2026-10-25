@@ -225,3 +225,32 @@ func TestOrphanSharesAreBounded(t *testing.T) {
 		t.Fatal("expired shares did not make room")
 	}
 }
+
+// The pool the RPC reports is what the next blocks may settle: a share a block paid leaves it at
+// once, though the pool itself keeps it until it expires (for the votes between siblings).
+func TestSharePoolShowsWhatIsNotSettled(t *testing.T) {
+	node := NewNode(chain.RegTest, chain.RegtestGenesis(), mh.TestProfile)
+	defer node.Close()
+	if err := node.MineBlocks(4); err != nil {
+		t.Fatal(err)
+	}
+	a, b := shareOn(t, node, 1, 11), shareOn(t, node, 2, 12)
+	for _, s := range []*chain.Share{a, b} {
+		if _, err := node.SubmitShare(s); err != nil {
+			t.Fatalf("submitshare: %v", err)
+		}
+	}
+	if _, tally := node.SharePool(); len(tally) != 2 {
+		t.Fatalf("before the block: %d miners in the pool, want 2", len(tally))
+	}
+	if err := node.SubmitBlock(mineBlockWith(t, node, nil, a)); err != nil {
+		t.Fatalf("a block settling one share: %v", err)
+	}
+	_, tally := node.SharePool()
+	if _, ok := tally[a.Commit.Payout]; ok || len(tally) != 1 {
+		t.Fatalf("after the block: %v, want only the unsettled share", tally)
+	}
+	if node.shares.Len() < 2 {
+		t.Fatal("the pool itself keeps a settled share until it expires")
+	}
+}
