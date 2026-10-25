@@ -207,3 +207,63 @@ func TestApplyRejectsGap(t *testing.T) {
 		t.Fatalf("a skipped block has to be refused, got %v", err)
 	}
 }
+
+// The disk's unwind of a block in which one transaction spends another's output (PM-01): the
+// coins have to be exactly those before the block, the in-between output included.
+func TestRevertOfAChainInsideOneBlock(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	blocks := testChain(10)
+	for _, b := range blocks[:9] {
+		if err := s.PutBlock(b); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.ApplyBlockDirect(b); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The extra output testChain puts into block 0's coinbase: A spends it, B spends A's output.
+	cb0 := blocks[0].Txs[0]
+	u := chain.Outpoint{TxID: cb0.TxID(), Index: uint32(len(cb0.Outputs) - 1)}
+	if _, ok := s.Coin(u); !ok {
+		t.Fatal("the coin to spend is not there")
+	}
+	a := &chain.Tx{Version: 1, Inputs: []chain.TxIn{{PrevTxID: u.TxID, PrevIndex: u.Index}},
+		Outputs: []chain.TxOut{{Value: 1, Script: []byte("x")}}}
+	x := chain.Outpoint{TxID: a.TxID(), Index: 0}
+	b := &chain.Tx{Version: 1, Inputs: []chain.TxIn{{PrevTxID: x.TxID, PrevIndex: 0}},
+		Outputs: []chain.TxOut{{Value: 1, Script: []byte("y")}}}
+	last := blocks[9]
+	last.Txs = append(last.Txs, a, b)
+	last.Seal()
+
+	before, err := s.CoinCount()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutBlock(last); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ApplyBlockDirect(last); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s.Coin(x); ok {
+		t.Fatal("the output spent within the block is still there")
+	}
+	if err := s.RevertTip(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s.Coin(x); ok {
+		t.Fatal("the revert brought back an output that did not exist before the block")
+	}
+	if _, ok := s.Coin(u); !ok {
+		t.Fatal("the revert did not bring back the coin the block spent")
+	}
+	if after, err := s.CoinCount(); err != nil || after != before {
+		t.Fatalf("after the revert %d coins (%v), before the block %d", after, err, before)
+	}
+}

@@ -390,13 +390,16 @@ func (s *Store) RevertTip() error {
 	batch := s.db.NewBatch()
 	defer batch.Close()
 
-	for _, op := range undo.Created {
-		if err := batch.Delete(keyCoin(op.TxID, op.Index), nil); err != nil {
+	// The spent coins first, the created ones after — the order chain.UTXOSet.Undo explains: an
+	// output created and spent in the same block is in both lists and must end up deleted. The
+	// batch applies its operations in order. It also unwinds undo records written before the fix.
+	for _, e := range undo.Spent {
+		if err := batch.Set(keyCoin(e.Outpoint.TxID, e.Outpoint.Index), encodeCoin(e.Coin), nil); err != nil {
 			return fmt.Errorf("store: %w", err)
 		}
 	}
-	for _, e := range undo.Spent {
-		if err := batch.Set(keyCoin(e.Outpoint.TxID, e.Outpoint.Index), encodeCoin(e.Coin), nil); err != nil {
+	for _, op := range undo.Created {
+		if err := batch.Delete(keyCoin(op.TxID, op.Index), nil); err != nil {
 			return fmt.Errorf("store: %w", err)
 		}
 	}

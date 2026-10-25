@@ -160,3 +160,56 @@ func FuzzDeserializeBlock(f *testing.F) {
 		_ = blk.ValidateBlock(u, p)
 	})
 }
+
+// A transaction may spend an output of an earlier one in the same block. Undoing such a block must
+// not bring that output back: it did not exist before the block (audit 2026-10-25, PM-01).
+func TestUndoOfAChainInsideOneBlock(t *testing.T) {
+	p := RegTest
+	u := NewUTXOSet()
+	sk, pk := testKey(t, 6)
+	prev := Outpoint{TxID: [32]byte{43}, Index: 0}
+	prevCoin := Coin{Value: 10 * POWM, Script: pk, Height: 5}
+	u.AddCoin(prev, prevCoin)
+	before := u.Snapshot()
+
+	h := uint64(10)
+	a := &Tx{Version: 1,
+		Inputs:  []TxIn{{PrevTxID: prev.TxID, PrevIndex: 0}},
+		Outputs: []TxOut{{Value: 9 * POWM, Script: pk}},
+	}
+	sig, err := SignInput(a, 0, []Coin{prevCoin}, sk, p.At(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Witness = []Witness{{Items: [][]byte{sig}}}
+	x := Outpoint{TxID: a.TxID(), Index: 0}
+	xCoin := Coin{Value: 9 * POWM, Script: pk, Height: h}
+	b := &Tx{Version: 1,
+		Inputs:  []TxIn{{PrevTxID: x.TxID, PrevIndex: 0}},
+		Outputs: []TxOut{{Value: 8 * POWM, Script: pk}},
+	}
+	sig, err = SignInput(b, 0, []Coin{xCoin}, sk, p.At(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.Witness = []Witness{{Items: [][]byte{sig}}}
+	blk := blockWith(h, []*Tx{coinbaseTx(h, 0, p), a, b})
+	if err := blk.ValidateBlock(u, p); err != nil {
+		t.Fatal(err)
+	}
+
+	undo, err := u.Apply(blk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := u.Get(x); ok {
+		t.Fatal("the output spent within the block is still there")
+	}
+	u.Undo(undo)
+	if _, ok := u.Get(x); ok {
+		t.Fatal("the undo brought back an output that did not exist before the block")
+	}
+	if !reflect.DeepEqual(u.Snapshot(), before) {
+		t.Fatal("Undo did not restore exactly the original state")
+	}
+}
