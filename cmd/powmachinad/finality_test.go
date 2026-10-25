@@ -152,7 +152,7 @@ func TestFinalitySurvivesARestart(t *testing.T) {
 	if !ok {
 		t.Fatal("nothing final before the restart")
 	}
-	// A proof has to be of a key with a seat (PM-03): the node's own, signing twice by hand.
+	// A proof has to be of a key with a seat: the node's own, signing twice by hand.
 	priv := node.signer.Priv()
 	ev := &chain.Equivocation{Height: final, First: chain.Sign(priv, final, [32]byte{1}), Second: chain.Sign(priv, final, [32]byte{2})}
 	ev.Key = ev.First.Key

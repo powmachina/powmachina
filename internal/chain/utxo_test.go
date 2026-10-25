@@ -162,7 +162,7 @@ func FuzzDeserializeBlock(f *testing.F) {
 }
 
 // A transaction may spend an output of an earlier one in the same block. Undoing such a block must
-// not bring that output back: it did not exist before the block (audit 2026-10-25, PM-01).
+// not bring that output back: it did not exist before the block.
 func TestUndoOfAChainInsideOneBlock(t *testing.T) {
 	p := RegTest
 	u := NewUTXOSet()

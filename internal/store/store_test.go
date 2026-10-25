@@ -208,7 +208,7 @@ func TestApplyRejectsGap(t *testing.T) {
 	}
 }
 
-// The disk's unwind of a block in which one transaction spends another's output (PM-01): the
+// The disk's unwind of a block in which one transaction spends another's output: the
 // coins have to be exactly those before the block, the in-between output included.
 func TestRevertOfAChainInsideOneBlock(t *testing.T) {
 	s, err := Open(filepath.Join(t.TempDir(), "db"))

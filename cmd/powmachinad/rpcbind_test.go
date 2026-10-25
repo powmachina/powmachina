@@ -2,7 +2,7 @@ package main
 
 import "testing"
 
-// Without a token the RPC may only listen on loopback (PM-04).
+// Without a token the RPC may only listen on loopback.
 func TestRPCBindNeedsATokenOffLoopback(t *testing.T) {
 	for addr, ok := range map[string]bool{
 		"127.0.0.1:17697":  true,

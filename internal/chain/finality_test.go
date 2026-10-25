@@ -289,7 +289,7 @@ func TestACaughtKeyStopsCounting(t *testing.T) {
 
 // A proof from the network has to be one: the same key, the same height, two blocks, two
 // signatures — and a key with a seat in that height's quorum, or anybody could fill the node's
-// memory and disk with keys made up to sign twice (PM-03).
+// memory and disk with keys made up to sign twice.
 func TestEquivocationFromTheNetworkIsChecked(t *testing.T) {
 	a, b, stranger := finalityKey(1), finalityKey(2), finalityKey(3)
 	q := quorumsOf(window{}.mined(1, 40, a).mined(41, 50, b))(50)

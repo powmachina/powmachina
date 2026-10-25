@@ -253,7 +253,7 @@ func (u *UTXOSet) Undo(undo *BlockUndo) {
 // The spent coins come back first and the created ones go after: a transaction may spend an
 // output of an earlier one in the same block, and that output is in both lists. Restored and then
 // deleted it is gone, as it was before the block; the other way round it would come back as a
-// coin that never existed (audit 2026-10-25, PM-01).
+// coin that never existed.
 func (u *UTXOSet) rollbackLocked(undo *BlockUndo) {
 	for _, e := range undo.Spent {
 		u.coins[e.Outpoint] = e.Coin
