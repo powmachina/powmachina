@@ -41,7 +41,7 @@ crowd the other out. A miner runs both at once if it has the hardware for both.
 | Addresses | `powm1q…` — bech32m (testnet `tpowm1q…`, regtest `rpowm1q…`) |
 | Block time | 30 s, so 60 s per lane · block at most 96 kB + the shares it settles |
 | Finality | the miners of the last day (2,880 blocks), more than 2/3 of their weight, at a depth of 80 blocks (~40 min) |
-| Max supply | 84,000,000 POWM · halving every 4 years |
+| Supply | ~84,000,000 POWM through the halvings (every 4 years), then a permanent 0.24975 POWM a block — no hard cap |
 | Premine | **none** — block one pays 0.10 POWM instead of 10 |
 | Dev fee | 5 % of the subsidy to height 2,100,000 (~2 years), then nothing |
 

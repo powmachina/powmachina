@@ -36,7 +36,7 @@ func main() {
 	listenAddr := flag.String("listen", "", "address to listen on (e.g. 127.0.0.1:27696 on regtest; mainnet 7696)")
 	connectAddr := flag.String("connect", "", "address of the peer to sync from")
 	mine := flag.Int("mine", 0, "mine N blocks (regtest only, for development)")
-	rpcAddr := flag.String("rpc", "", "address of the RPC server (localhost only, e.g. 127.0.0.1:27697 on regtest; mainnet 7697)")
+	rpcAddr := flag.String("rpc", "", "address of the RPC server (e.g. 127.0.0.1:27697 on regtest; mainnet 7697); any other than loopback needs POWM_RPC_TOKEN")
 	stratumAddr := flag.String("stratum", "", "stratum server for miners (e.g. 0.0.0.0:27699 on regtest; mainnet 7699)")
 	stratumPay := flag.String("stratum-address", "", "pay every stratum block here (a single-owner farm); otherwise to the address from the miner login")
 	mineAddr := flag.String("mineaddress", "", "address -mine pays to (without it a throwaway key, the reward is lost)")
@@ -250,7 +250,11 @@ func runNode(params chain.NetParams, listenAddr, connectAddr, rpcAddr, stratumAd
 
 	if rpcAddr != "" {
 		// The token comes from the environment so it ends up neither in shell history nor in the process list.
-		srv := rpc.NewServer(node, os.Getenv("POWM_RPC_TOKEN")).HTTPServer(rpcAddr)
+		token := os.Getenv("POWM_RPC_TOKEN")
+		if err := checkRPCBind(rpcAddr, token); err != nil {
+			log.Fatalf("RPC: %v", err)
+		}
+		srv := rpc.NewServer(node, token).HTTPServer(rpcAddr)
 		// We open the listener ourselves so the **real** address can be printed. With
 		// `127.0.0.1:0` (how the desktop wallet starts its node) the log would otherwise say
 		// `:0` and the caller would have no way to learn where to connect.
