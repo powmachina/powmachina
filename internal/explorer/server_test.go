@@ -758,3 +758,45 @@ func TestLiveSharepoolAPI(t *testing.T) {
 		t.Fatalf("the cached answer: %d", again.Code)
 	}
 }
+
+// The address page shows the address's Sharepool credit and when it is paid; a node that cannot
+// answer for one address leaves the section out and the page still works.
+func TestAddressCredit(t *testing.T) {
+	node := fakeNode(t, map[string]any{"getcredits": map[string]any{"height": 7636, "count": 1, "credits": []any{
+		map[string]any{"address": "rpowm1qtest", "amount_cogs": 270872784024, "need_cogs": 5_000_000,
+			"last_share": 7163, "paid_at": 5149, "ready_at": 5200},
+	}}})
+	defer node.Close()
+	body := get(t, newTestServer(t, node), "/explorer/address/rpowm1qtest").Body.String()
+	for _, want := range []string{"Sharepool credit", "2,708.72784024", "from block 8030", "block 5149", "block 7163"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the address page is missing %q", want)
+		}
+	}
+
+	old := fakeNode(t, map[string]any{"getcredits": nil})
+	defer old.Close()
+	rec := get(t, newTestServer(t, old), "/explorer/address/rpowm1qtest")
+	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), "Sharepool credit") {
+		t.Errorf("without getcredits: %d, section shown %v", rec.Code, strings.Contains(rec.Body.String(), "Sharepool credit"))
+	}
+}
+
+func TestCreditView(t *testing.T) {
+	for _, tc := range []struct {
+		name                    string
+		height, paidAt, readyAt uint64
+		ready                   bool
+		next                    uint64
+	}{
+		{"below its payout", 7636, 5149, 0, false, 0},
+		{"paid less than a day ago", 7636, 5149, 5200, true, 8030},
+		{"the next block may pay it", 8029, 5149, 5200, true, 0},
+		{"never paid", 100, 0, 90, true, 0},
+	} {
+		c := creditView(tc.height, 1, 1, 1, tc.paidAt, tc.readyAt)
+		if c.Ready != tc.ready || c.NextFrom != tc.next {
+			t.Errorf("%s: ready %v next %d, want %v %d", tc.name, c.Ready, c.NextFrom, tc.ready, tc.next)
+		}
+	}
+}

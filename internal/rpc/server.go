@@ -1080,7 +1080,8 @@ const MaxCredits = 10_000
 // mine now are at the top, a tie by amount and then by address.
 func (s *Server) getCredits(params json.RawMessage) (any, error) {
 	var p struct {
-		Limit int `json:"limit"`
+		Limit   int    `json:"limit"`
+		Address string `json:"address"`
 	}
 	if len(params) > 0 {
 		if err := decodeParams(params, &p); err != nil {
@@ -1090,6 +1091,9 @@ func (s *Server) getCredits(params json.RawMessage) (any, error) {
 	if p.Limit <= 0 || p.Limit > MaxCredits {
 		p.Limit = MaxCredits
 	}
+	// With an address only that address's credit comes back (none if it has nothing waiting), so a
+	// miner finds its own credit however many others there are.
+	p.Address = strings.ToLower(strings.TrimSpace(p.Address))
 	pot, height, credits, err := s.backend.Credits()
 	if err != nil {
 		return nil, err
@@ -1103,6 +1107,9 @@ func (s *Server) getCredits(params json.RawMessage) (any, error) {
 		a, err := s.backend.AddressOf(chain.ScriptVersionBasic, k[:])
 		if err != nil {
 			a = hex.EncodeToString(k[:])
+		}
+		if p.Address != "" && a != p.Address {
+			continue
 		}
 		rows = append(rows, row{a, c})
 	}
@@ -1124,6 +1131,7 @@ func (s *Server) getCredits(params json.RawMessage) (any, error) {
 			"need_cogs":   chain.PayoutNeed(r.c.Threshold),
 			"last_share":  r.c.LastShare,
 			"paid_at":     r.c.PaidAt,
+			"ready_at":    r.c.ReadyAt,
 		})
 	}
 	return map[string]any{"height": height, "pot_cogs": pot, "count": len(rows), "credits": out}, nil
@@ -1260,7 +1268,7 @@ var positionalNames = map[string][]string{
 	"getrawtransaction":  {"txid"},
 	"getaddress":         {"address", "before", "limit"},
 	"getrichlist":        {"limit"},
-	"getcredits":         {"limit"},
+	"getcredits":         {"limit", "address"},
 	"sendrawtransaction": {"hex"},
 	"gettemplate":        {"lane"},
 	"getrawblocks":       {"from", "count"},

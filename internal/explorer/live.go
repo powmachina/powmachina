@@ -176,6 +176,7 @@ type Credits struct {
 		NeedCogs   int64  `json:"need_cogs"`
 		LastShare  uint64 `json:"last_share"`
 		PaidAt     uint64 `json:"paid_at"`
+		ReadyAt    uint64 `json:"ready_at"`
 	} `json:"credits"`
 }
 

@@ -8,6 +8,18 @@
   <dt>transactions</dt><dd>{{$a.TxCount}}</dd>
 </dl>
 
+{{with $d.Credit}}
+<h2>Sharepool credit</h2>
+<dl class="props">
+  <dt>waiting</dt><dd>{{cogs .AmountCogs}} POWM</dd>
+  <dt>paid out at</dt><dd>{{cogs .NeedCogs}} POWM or more</dd>
+  <dt>next payout</dt><dd>{{if not .Ready}}once the credit reaches {{cogs .NeedCogs}} POWM{{else if .NextFrom}}from block {{.NextFrom}} (in about {{.Wait}}){{else}}queued for the next blocks{{end}}</dd>
+  <dt>last payout</dt><dd>{{if .PaidAt}}<a href="{{url "/block/"}}{{.PaidAt}}">block {{.PaidAt}}</a>{{else}}none yet{{end}}</dd>
+  <dt>last share</dt><dd><a href="{{url "/block/"}}{{.LastShare}}">block {{.LastShare}}</a></dd>
+</dl>
+<p class="meta"><span>the Sharepool pays an address at most once every 2,880 blocks (about a day); the payout goes into a block's coinbase, straight to this address</span></p>
+{{end}}
+
 <h2>Activity</h2>
 <div class="scroll">
 <table>

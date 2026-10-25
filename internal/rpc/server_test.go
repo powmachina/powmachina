@@ -968,6 +968,49 @@ func TestGetCreditsOrder(t *testing.T) {
 	}
 }
 
+// getcredits with an address answers for that address alone, however many others there are.
+func TestGetCreditsOfOneAddress(t *testing.T) {
+	mine, other := [32]byte{4}, [32]byte{5}
+	be := &fakeBackend{height: 900, credits: map[[32]byte]chain.Credit{
+		mine:  {Amount: 6_000_000, LastShare: 700, PaidAt: 200, ReadyAt: 650},
+		other: {Amount: 9_000_000, LastShare: 899},
+	}}
+	srv := NewServer(be, "secret")
+	addr, err := be.AddressOf(chain.ScriptVersionBasic, mine[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	type rows struct {
+		Result struct {
+			Count   int `json:"count"`
+			Credits []struct {
+				Address string `json:"address"`
+				Amount  int64  `json:"amount_cogs"`
+				PaidAt  uint64 `json:"paid_at"`
+				ReadyAt uint64 `json:"ready_at"`
+			} `json:"credits"`
+		} `json:"result"`
+		Error *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	var res rows
+	callJSON(t, srv, "getcredits", map[string]any{"address": " " + strings.ToUpper(addr) + " "}, &res)
+	if res.Error != nil {
+		t.Fatal(res.Error.Message)
+	}
+	if c := res.Result.Credits; res.Result.Count != 1 || len(c) != 1 || c[0].Address != addr ||
+		c[0].Amount != 6_000_000 || c[0].PaidAt != 200 || c[0].ReadyAt != 650 {
+		t.Fatalf("%+v", res.Result)
+	}
+	nobody, _ := be.AddressOf(chain.ScriptVersionBasic, make([]byte, 32))
+	var none rows
+	callJSON(t, srv, "getcredits", map[string]any{"address": nobody}, &none)
+	if none.Error != nil || none.Result.Count != 0 || len(none.Result.Credits) != 0 {
+		t.Fatalf("an address without a credit: %+v", none.Result)
+	}
+}
+
 // getsharegeo: the countries by the window, the most first, with the counts since the start.
 func TestGetShareGeo(t *testing.T) {
 	srv := NewServer(&fakeBackend{height: 1}, "secret")

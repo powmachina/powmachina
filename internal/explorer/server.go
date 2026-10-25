@@ -501,6 +501,55 @@ type addressData struct {
 	Addr    Address
 	Older   int64
 	PerPage int
+	// Credit is the address's Sharepool credit waiting for its payout; nil when it has none, or the
+	// node cannot answer for one address.
+	Credit *AddressCredit
+}
+
+// AddressCredit is what the Sharepool owes an address, and when it pays.
+type AddressCredit struct {
+	AmountCogs int64
+	NeedCogs   int64
+	LastShare  uint64
+	PaidAt     uint64
+	// Ready: the credit has reached its payout. NextFrom is the first height that may pay it — 0 =
+	// the next block may — and Wait is about how long until then.
+	Ready    bool
+	NextFrom uint64
+	Wait     string
+}
+
+// The explorer does not import internal/chain (it builds without cgo), so these two follow
+// chain.PayoutInterval and the block target.
+const (
+	payoutInterval = 2880
+	blockSeconds   = 30
+)
+
+// creditOf asks the node for one address's credit. A node that does not know getcredits by address
+// yet, or a failure, only leaves the section out.
+func (s *Server) creditOf(ctx context.Context, addr string) *AddressCredit {
+	var cr Credits
+	if err := s.cli.Call(ctx, "getcredits", map[string]any{"address": addr}, &cr); err != nil {
+		log.Printf("address: getcredits: %v", err)
+		return nil
+	}
+	if len(cr.Credits) == 0 {
+		return nil
+	}
+	return creditView(cr.Height, cr.Credits[0].AmountCogs, cr.Credits[0].NeedCogs,
+		cr.Credits[0].LastShare, cr.Credits[0].PaidAt, cr.Credits[0].ReadyAt)
+}
+
+// creditView works out when a credit is paid: a key is paid once its credit reaches what its
+// threshold asks for, and at most once in payoutInterval blocks.
+func creditView(height uint64, amount, need int64, lastShare, paidAt, readyAt uint64) *AddressCredit {
+	c := &AddressCredit{AmountCogs: amount, NeedCogs: need, LastShare: lastShare, PaidAt: paidAt, Ready: readyAt != 0}
+	if c.Ready && paidAt != 0 && height+1 <= paidAt+payoutInterval {
+		c.NextFrom = paidAt + payoutInterval + 1
+		c.Wait = FormatDuration(time.Duration(c.NextFrom-height) * blockSeconds * time.Second)
+	}
+	return c
 }
 
 func (s *Server) handleAddress(w http.ResponseWriter, r *http.Request) {
@@ -527,7 +576,7 @@ func (s *Server) handleAddress(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	d := addressData{Addr: a, Older: -1, PerPage: s.cfg.TxsPerPage}
+	d := addressData{Addr: a, Older: -1, PerPage: s.cfg.TxsPerPage, Credit: s.creditOf(ctx, addr)}
 	// Paging goes by height, not by offset: with a new block an offset would shift the rows and one
 	// would be lost.
 	if n := len(a.Txs); n >= s.cfg.TxsPerPage && n > 0 {
