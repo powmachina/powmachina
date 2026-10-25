@@ -254,3 +254,19 @@ func TestSharePoolShowsWhatIsNotSettled(t *testing.T) {
 		t.Fatal("the pool itself keeps a settled share until it expires")
 	}
 }
+
+// A light node's sample: k distinct shares of n, all of them when there are fewer.
+func TestSampledPoWPicks(t *testing.T) {
+	for _, c := range []struct{ n, k, want int }{{400, 8, 8}, {3, 8, 3}, {0, 8, 0}, {8, 8, 8}} {
+		s := newSampledPoW(nil, c.n, c.k)
+		got := 0
+		for i := range c.n {
+			if s.Checks(i) {
+				got++
+			}
+		}
+		if got != c.want || len(s.pick) != c.want || s.Checks(c.n) {
+			t.Fatalf("n %d k %d: picked %d", c.n, c.k, got)
+		}
+	}
+}

@@ -351,9 +351,9 @@ type SettledShare struct {
 // one of the last blocks already settled; and the shares come in the order of their ids.
 //
 // The PoW is the expensive part — a full node pays 1.5–5 ms per share. `pow` is where a node
-// answers from the shares it already verified when they were relayed. A nil `pow` takes the PoW
-// on trust: a light node, for which a share costs 35–100 ms, checks everything else and leaves
-// the PoW to the full nodes (the Sharepool spec §7).
+// answers from the shares it already verified when they were relayed. A SampledPoW checks only
+// the shares it picks (a light node at the tip), and a nil `pow` takes the PoW on trust (a light
+// node catching up on history); either way everything else is checked (the Sharepool spec §7).
 func (b *Block) CheckSettlement(v *SettlementView, pow PoWHasher, params NetParams) ([]SettledShare, error) {
 	if v == nil {
 		return nil, errSettlementMissing
@@ -387,7 +387,7 @@ func (b *Block) CheckSettlement(v *SettlementView, pow PoWHasher, params NetPara
 			return nil, fmt.Errorf("%w: share %d", ErrShareTimeTooNew, i)
 		}
 		j := &s.Jobs[s.Shares[i].Job]
-		if pow != nil {
+		if pow != nil && checksShare(pow, i) {
 			hash, err := pow.PoWHash(h)
 			if err != nil {
 				return nil, fmt.Errorf("%w: %w", ErrSettlementUnchecked, err)
@@ -403,6 +403,20 @@ func (b *Block) CheckSettlement(v *SettlementView, pow PoWHasher, params NetPara
 		out = append(out, SettledShare{ID: id, Key: s.Keys[j.Key], Units: 1 << j.Weight, Lane: j.Lane})
 	}
 	return out, nil
+}
+
+// SampledPoW is a PoWHasher that checks only some of a settlement's shares: a light node's, for
+// which every share would cost 35–100 ms. CheckSettlement asks it which ones by their index.
+type SampledPoW interface {
+	PoWHasher
+	Checks(index int) bool
+}
+
+func checksShare(pow PoWHasher, i int) bool {
+	if sp, ok := pow.(SampledPoW); ok {
+		return sp.Checks(i)
+	}
+	return true
 }
 
 // isBlock says whether an id is one of the blocks in the view: a block of the branch was already

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math/rand/v2"
 	"sync"
 	"time"
 
@@ -56,11 +57,16 @@ func (n *Node) checkSettlement(b *chain.Block) error {
 	if err != nil {
 		return fmt.Errorf("%w: %w", chain.ErrSettlementUnchecked, err)
 	}
-	// A node without the full DAG verifies no shares (the Sharepool spec §7): at 35–100 ms a share
-	// a block's settlement would take minutes. It checks the rest and trusts the PoW.
+	// A node without the full DAG cannot verify every share (the Sharepool spec §7): at 35–100 ms a
+	// share a block's settlement would take minutes. For a block near the tip it verifies a few
+	// shares it picks at random, so a block that pays made-up shares is caught by light nodes too,
+	// not only by the full ones; deep in history it trusts the PoW of the blocks above.
 	var pow chain.PoWHasher
-	if n.epochs.isFull() {
+	switch {
+	case n.epochs.isFull():
 		pow = n.shares.PoWHash(epochHasher{n.epochs})
+	case time.Since(b.Header.Timestamp()) < lightSampleWithin:
+		pow = newSampledPoW(epochHasher{n.epochs}, len(b.Settlement.Shares), lightSampleShares)
 	}
 	paid, err := b.CheckSettlement(v, pow, n.params)
 	if err != nil {
@@ -306,4 +312,31 @@ func (n *Node) templateSettlement(tipID [32]byte, tipHeight uint64) (*chain.Sett
 		// Too many distinct miners for the bytes: the newest tenth waits for the next block.
 		shares = shares[:len(shares)*9/10]
 	}
+}
+
+// How many of a block's shares a light node verifies, and for blocks how recent. Eight at
+// 35–100 ms each is under a second per block, every 30 s; a block whose settlement is a tenth
+// made up passes one light node's check with a probability of 0.9^8 ≈ 43 %, a quarter made up
+// with 10 %, and every light node draws its own sample.
+const (
+	lightSampleShares = 8
+	lightSampleWithin = 2 * time.Hour
+)
+
+// sampledPoW verifies the PoW of the shares it picked and takes the rest on trust.
+type sampledPoW struct {
+	chain.PoWHasher
+	pick map[int]bool
+}
+
+func (s sampledPoW) Checks(i int) bool { return s.pick[i] }
+
+// newSampledPoW picks k of n shares at random. The pick is the node's own: a miner cannot know
+// which of its shares a light node will look at.
+func newSampledPoW(h chain.PoWHasher, n, k int) sampledPoW {
+	pick := make(map[int]bool, min(n, k))
+	for _, i := range rand.Perm(n)[:min(n, k)] {
+		pick[i] = true
+	}
+	return sampledPoW{h, pick}
 }

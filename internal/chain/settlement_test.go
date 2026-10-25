@@ -224,3 +224,28 @@ func TestSettlementStructure(t *testing.T) {
 		t.Fatalf("a share 9 below the block: %v", err)
 	}
 }
+
+type pickHash struct {
+	PoWHasher
+	pick map[int]bool
+}
+
+func (p pickHash) Checks(i int) bool { return p.pick[i] }
+
+// A light node verifies the shares it samples: a sampled share without its PoW fails the block,
+// the ones it did not pick are taken on trust.
+func TestSettlementSampledPoW(t *testing.T) {
+	hc, hs, share := settleChain(t)
+	a, b2 := share(1, 1, mh.LaneC, 1), share(2, 2, mh.LaneG, 2)
+	blk := nextBlock(t, hs, a, b2)
+	bad := fixedHash{0xff}
+	if _, err := blk.CheckSettlement(viewFor(t, hc, blk), pickHash{bad, map[int]bool{1: true}}, RegTest); !errors.Is(err, ErrSharePoW) {
+		t.Fatalf("a sampled share without its PoW: %v", err)
+	}
+	if got, err := blk.CheckSettlement(viewFor(t, hc, blk), pickHash{bad, nil}, RegTest); err != nil || len(got) != 2 {
+		t.Fatalf("nothing sampled: %d shares, %v", len(got), err)
+	}
+	if _, err := blk.CheckSettlement(viewFor(t, hc, blk), pickHash{lowHash, map[int]bool{0: true, 1: true}}, RegTest); err != nil {
+		t.Fatalf("sampled shares with their PoW: %v", err)
+	}
+}
