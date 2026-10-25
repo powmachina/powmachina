@@ -302,9 +302,15 @@ func (f *FinalityState) Add(a Attestation, q *Quorum) (*Equivocation, error) {
 	return nil, nil
 }
 
-// AddEquivocation files a proof of double signing that came from the network. It returns false
-// when the proof is not valid or the key is already known to have done it.
-func (f *FinalityState) AddEquivocation(e *Equivocation) bool {
+// AddEquivocation files a proof of double signing that came from the network. `q` is the quorum
+// of the proof's height: a key without a seat in it could not have moved finality, and anybody can
+// make up keys that sign twice — kept and relayed, they would grow the node's memory, its finality
+// file and the gossip without end (audit 2026-10-25, PM-03). It returns false when the proof is not
+// valid, its key has no seat, or the key is already known to have done it.
+func (f *FinalityState) AddEquivocation(e *Equivocation, q *Quorum) bool {
+	if q == nil || q.Height != e.Height || q.Weight(e.Key) == 0 {
+		return false
+	}
 	if e.Verify() != nil {
 		return false
 	}

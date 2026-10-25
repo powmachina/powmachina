@@ -187,7 +187,7 @@ func (n *Node) SubmitAttestation(a chain.Attestation) error {
 
 // acceptEquivocation files a proof of double signing from the network and passes it on once.
 func (n *Node) acceptEquivocation(ev *chain.Equivocation, from string) {
-	if n.finality == nil || !n.finality.AddEquivocation(ev) {
+	if n.finality == nil || !n.finality.AddEquivocation(ev, n.quorumAt(ev.Height)) {
 		return
 	}
 	log.Printf("PROOF OF DOUBLE SIGNING from the network: %v", ev)
@@ -289,7 +289,9 @@ func (n *Node) loadFinality() {
 	for _, h := range rec.Caught {
 		if b, err := hex.DecodeString(h); err == nil {
 			if ev, err := p2p.DecodeEquivocation(b); err == nil {
-				n.finality.AddEquivocation(ev)
+				// The same check as from the network: it also drops proofs of keys without a seat
+				// that a node before the fix kept.
+				n.finality.AddEquivocation(ev, n.quorumAt(ev.Height))
 			}
 		}
 	}

@@ -152,9 +152,17 @@ func TestFinalitySurvivesARestart(t *testing.T) {
 	if !ok {
 		t.Fatal("nothing final before the restart")
 	}
-	_, other, _ := ed25519.GenerateKey(nil)
-	ev := &chain.Equivocation{Height: 5, First: chain.Sign(other, 5, [32]byte{1}), Second: chain.Sign(other, 5, [32]byte{2})}
+	// A proof has to be of a key with a seat (PM-03): the node's own, signing twice by hand.
+	priv := node.signer.Priv()
+	ev := &chain.Equivocation{Height: final, First: chain.Sign(priv, final, [32]byte{1}), Second: chain.Sign(priv, final, [32]byte{2})}
 	ev.Key = ev.First.Key
+	_, stranger, _ := ed25519.GenerateKey(nil)
+	junk := &chain.Equivocation{Height: final, First: chain.Sign(stranger, final, [32]byte{1}), Second: chain.Sign(stranger, final, [32]byte{2})}
+	junk.Key = junk.First.Key
+	node.acceptEquivocation(junk, "")
+	if len(node.finality.Caught()) != 0 {
+		t.Fatal("a proof of a key without a seat was kept")
+	}
 	node.acceptEquivocation(ev, "")
 	key := *node.FinalityKey()
 	node.Close()

@@ -287,26 +287,40 @@ func TestACaughtKeyStopsCounting(t *testing.T) {
 	}
 }
 
-// A proof from the network has to be one: the same key, the same height, two blocks, two signatures.
+// A proof from the network has to be one: the same key, the same height, two blocks, two
+// signatures — and a key with a seat in that height's quorum, or anybody could fill the node's
+// memory and disk with keys made up to sign twice (PM-03).
 func TestEquivocationFromTheNetworkIsChecked(t *testing.T) {
-	a, b := finalityKey(1), finalityKey(2)
-	good := &Equivocation{Key: pubOf(a), Height: 7, First: Sign(a, 7, blockID(1)), Second: Sign(a, 7, blockID(2))}
+	a, b, stranger := finalityKey(1), finalityKey(2), finalityKey(3)
+	q := quorumsOf(window{}.mined(1, 40, a).mined(41, 50, b))(50)
+	good := &Equivocation{Key: pubOf(a), Height: 50, First: Sign(a, 50, blockID(1)), Second: Sign(a, 50, blockID(2))}
 	f := NewFinalityState()
-	if !f.AddEquivocation(good) {
+	if !f.AddEquivocation(good, q) {
 		t.Fatal("a valid proof was refused")
 	}
-	if f.AddEquivocation(good) {
+	if f.AddEquivocation(good, q) {
 		t.Fatal("the same key was caught twice")
 	}
 	for name, e := range map[string]*Equivocation{
-		"two keys":      {Key: pubOf(b), Height: 7, First: Sign(b, 7, blockID(1)), Second: Sign(a, 7, blockID(2))},
-		"two heights":   {Key: pubOf(b), Height: 7, First: Sign(b, 7, blockID(1)), Second: Sign(b, 8, blockID(2))},
-		"one block":     {Key: pubOf(b), Height: 7, First: Sign(b, 7, blockID(1)), Second: Sign(b, 7, blockID(1))},
-		"a forged half": {Key: pubOf(b), Height: 7, First: Sign(b, 7, blockID(1)), Second: Attestation{Height: 7, BlockID: blockID(2), Key: pubOf(b), Signature: make([]byte, 64)}},
+		"two keys":      {Key: pubOf(b), Height: 50, First: Sign(b, 50, blockID(1)), Second: Sign(a, 50, blockID(2))},
+		"two heights":   {Key: pubOf(b), Height: 50, First: Sign(b, 50, blockID(1)), Second: Sign(b, 51, blockID(2))},
+		"one block":     {Key: pubOf(b), Height: 50, First: Sign(b, 50, blockID(1)), Second: Sign(b, 50, blockID(1))},
+		"a forged half": {Key: pubOf(b), Height: 50, First: Sign(b, 50, blockID(1)), Second: Attestation{Height: 50, BlockID: blockID(2), Key: pubOf(b), Signature: make([]byte, 64)}},
+		"no seat":       {Key: pubOf(stranger), Height: 50, First: Sign(stranger, 50, blockID(1)), Second: Sign(stranger, 50, blockID(2))},
 	} {
-		if f.AddEquivocation(e) {
+		if f.AddEquivocation(e, q) {
 			t.Fatalf("%s: accepted", name)
 		}
+	}
+	other := &Equivocation{Key: pubOf(b), Height: 50, First: Sign(b, 50, blockID(1)), Second: Sign(b, 50, blockID(2))}
+	if f.AddEquivocation(other, nil) {
+		t.Fatal("accepted without a quorum to check the key against")
+	}
+	if f.AddEquivocation(&Equivocation{Key: pubOf(b), Height: 49, First: Sign(b, 49, blockID(1)), Second: Sign(b, 49, blockID(2))}, q) {
+		t.Fatal("accepted against the quorum of another height")
+	}
+	if len(f.Caught()) != 1 {
+		t.Fatalf("%d caught keys", len(f.Caught()))
 	}
 }
 
