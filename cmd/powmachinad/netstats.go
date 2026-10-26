@@ -35,9 +35,6 @@ type netStats struct {
 	tipSet   int                    // shares in the applied tip's settlement
 	tipSetB  int                    // the settlement body's bytes
 	tipUnits uint64                 // share units the applied tip paid (its settlement + its own)
-
-	creditKeys       int
-	creditKeysHeight uint64
 }
 
 // hist is a Prometheus histogram with fixed buckets.
@@ -197,15 +194,9 @@ func (s *netStats) write(b *strings.Builder, n *Node) {
 		gauge("powm_tip_settlement_bytes", "size of the applied tip's settlement body", float64(s.tipSetB))
 		gauge("powm_tip_settled_units", "share units the applied tip paid, its own included", float64(s.tipUnits))
 	}
-	// The number of keys with a credit, counted once per block: it is what the credit step's cost
-	// grows with.
-	if tip, err := n.store.Tip(); err == nil {
-		if tip.Height != s.creditKeysHeight || s.creditKeys == 0 {
-			count := 0
-			_ = n.store.ForEachCredit(func([32]byte, chain.Credit) error { count++; return nil })
-			s.creditKeys, s.creditKeysHeight = count, tip.Height
-		}
-		gauge("powm_credit_keys", "keys holding a credit", float64(s.creditKeys))
+	// The number of keys with a credit: the store keeps it with the state.
+	if count, err := n.store.CreditCount(); err == nil {
+		gauge("powm_credit_keys", "keys holding a credit", float64(count))
 		gauge("powm_credit_pot_cogs", "the Sharepool's pot", float64(n.store.Pot()))
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"powmachina/internal/address"
 	"powmachina/internal/chain"
 	"powmachina/internal/mh"
 )
@@ -221,22 +222,46 @@ func (n *Node) SharePool() (bool, map[[32]byte]chain.ShareTally) {
 	})
 }
 
-// Credits is the credit state of the applied tip, for getcredits.
-func (n *Node) Credits() (int64, uint64, map[[32]byte]chain.Credit, error) {
+// Credits is the credit state of the applied tip, for getcredits: one address's entry, or the
+// most recent ones. It reads only what it answers, not the whole state.
+func (n *Node) Credits(addr string, limit int) (int64, uint64, int, []chain.CreditEntry, error) {
+	var program [32]byte
+	one, holds := addr != "", true
+	if one {
+		version, prog, err := address.Decode(n.params.Bech32HRP, addr)
+		if err != nil {
+			return 0, 0, 0, nil, fmt.Errorf("invalid address: %w", err)
+		}
+		// Only a basic address of a 32-byte program can hold a credit.
+		holds = version == chain.ScriptVersionBasic && len(prog) == len(program)
+		copy(program[:], prog)
+	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	tip, err := n.store.Tip()
 	if err != nil {
-		return 0, 0, nil, err
+		return 0, 0, 0, nil, err
 	}
-	out := map[[32]byte]chain.Credit{}
-	if err := n.store.ForEachCredit(func(k [32]byte, c chain.Credit) error {
-		out[k] = c
-		return nil
-	}); err != nil {
-		return 0, 0, nil, err
+	pot := n.store.Pot()
+	if one {
+		if !holds {
+			return pot, tip.Height, 0, nil, nil
+		}
+		c, ok, err := n.store.Credit(program)
+		if err != nil || !ok {
+			return pot, tip.Height, 0, nil, err
+		}
+		return pot, tip.Height, 1, []chain.CreditEntry{{Payout: program, Credit: c}}, nil
 	}
-	return n.store.Pot(), tip.Height, out, nil
+	count, err := n.store.CreditCount()
+	if err != nil {
+		return 0, 0, 0, nil, err
+	}
+	entries, err := n.store.RecentCredits(limit)
+	if err != nil {
+		return 0, 0, 0, nil, err
+	}
+	return pot, tip.Height, count, entries, nil
 }
 
 // SubmitShare takes a share from a local miner (RPC submitshare) and says whether it is a block

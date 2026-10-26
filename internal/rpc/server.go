@@ -95,9 +95,11 @@ type Backend interface {
 	// SharePool sums the node's share pool by payout program; `full` is false on a node that
 	// holds no full DAG and so takes no shares.
 	SharePool() (full bool, tally map[[32]byte]chain.ShareTally)
-	// Credits is the credit state of the applied tip: the pot, the height it is at and every
-	// payout program's entry (the Sharepool spec §5).
-	Credits() (pot int64, height uint64, credits map[[32]byte]chain.Credit, err error)
+	// Credits is the credit state of the applied tip (the Sharepool spec §5): the pot, the height
+	// it is at, how many keys hold a credit and the
+	// entries with the most recent last share, at least `limit` of them (more when the cut falls
+	// inside one block). With an address, only that address's entry, and the count is 0 or 1.
+	Credits(address string, limit int) (pot int64, height uint64, count int, credits []chain.CreditEntry, err error)
 	// ShareGeo is where the shares the node took first came from, by country (ISO 3166-1 alpha-2):
 	// the last `minutes` and since the start, and the ones whose country is not known. Off without
 	// a GeoIP database.
@@ -1094,7 +1096,7 @@ func (s *Server) getCredits(params json.RawMessage) (any, error) {
 	// With an address only that address's credit comes back (none if it has nothing waiting), so a
 	// miner finds its own credit however many others there are.
 	p.Address = strings.ToLower(strings.TrimSpace(p.Address))
-	pot, height, credits, err := s.backend.Credits()
+	pot, height, count, credits, err := s.backend.Credits(p.Address, p.Limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1103,15 +1105,12 @@ func (s *Server) getCredits(params json.RawMessage) (any, error) {
 		c    chain.Credit
 	}
 	rows := make([]row, 0, len(credits))
-	for k, c := range credits {
-		a, err := s.backend.AddressOf(chain.ScriptVersionBasic, k[:])
+	for _, e := range credits {
+		a, err := s.backend.AddressOf(chain.ScriptVersionBasic, e.Payout[:])
 		if err != nil {
-			a = hex.EncodeToString(k[:])
+			a = hex.EncodeToString(e.Payout[:])
 		}
-		if p.Address != "" && a != p.Address {
-			continue
-		}
-		rows = append(rows, row{a, c})
+		rows = append(rows, row{a, e.Credit})
 	}
 	sort.Slice(rows, func(i, j int) bool {
 		a, b := rows[i].c, rows[j].c
@@ -1134,7 +1133,7 @@ func (s *Server) getCredits(params json.RawMessage) (any, error) {
 			"ready_at":    r.c.ReadyAt,
 		})
 	}
-	return map[string]any{"height": height, "pot_cogs": pot, "count": len(rows), "credits": out}, nil
+	return map[string]any{"height": height, "pot_cogs": pot, "count": count, "credits": out}, nil
 }
 
 // getShareGeo is the country of the shares the node took first: the country of the address each

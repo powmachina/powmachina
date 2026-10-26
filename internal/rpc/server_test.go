@@ -2,12 +2,14 @@ package rpc
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -130,9 +132,30 @@ func (f *fakeBackend) SharePool() (bool, map[[32]byte]chain.ShareTally) {
 func (f *fakeBackend) ShareGeo() (bool, int, map[string]int, map[string]uint64, int, uint64) {
 	return true, 30, map[string]int{"DE": 2, "FI": 5}, map[string]uint64{"DE": 9, "FI": 5, "US": 1}, 3, 4
 }
-func (f *fakeBackend) Credits() (int64, uint64, map[[32]byte]chain.Credit, error) {
+
+// Credits answers as the node does: one address, or the most recent entries with the cut block whole.
+func (f *fakeBackend) Credits(addr string, limit int) (int64, uint64, int, []chain.CreditEntry, error) {
 	_, h, _ := f.Tip()
-	return f.pot, h, f.credits, nil
+	var all []chain.CreditEntry
+	for p, c := range f.credits {
+		if a, _ := f.AddressOf(chain.ScriptVersionBasic, p[:]); addr == "" || a == addr {
+			all = append(all, chain.CreditEntry{Payout: p, Credit: c})
+		}
+	}
+	if addr != "" {
+		return f.pot, h, len(all), all, nil
+	}
+	slices.SortFunc(all, func(a, b chain.CreditEntry) int {
+		if a.Credit.LastShare != b.Credit.LastShare {
+			return cmp.Compare(b.Credit.LastShare, a.Credit.LastShare)
+		}
+		return bytes.Compare(a.Payout[:], b.Payout[:])
+	})
+	n := min(limit, len(all))
+	for n > 0 && n < len(all) && all[n].Credit.LastShare == all[n-1].Credit.LastShare {
+		n++
+	}
+	return f.pot, h, len(all), all[:n], nil
 }
 func (f *fakeBackend) TrustedWork() bool               { return true }
 func (f *fakeBackend) ClockSkew() (time.Duration, int) { return 0, 0 }
@@ -965,6 +988,11 @@ func TestGetCreditsOrder(t *testing.T) {
 	}
 	if r.Credits[1].Need != chain.PayoutNeed(1) || r.Credits[0].Need != chain.MinPayout {
 		t.Fatalf("need: %+v", r.Credits)
+	}
+	// A cut inside one block's entries still orders them by amount first.
+	callJSON(t, srv, "getcredits", []any{1}, &res)
+	if r := res.Result; len(r.Credits) != 1 || r.Credits[0].Amount != 4_000_000 || r.Count != 3 {
+		t.Fatalf("a cut inside a block: %+v", r)
 	}
 }
 

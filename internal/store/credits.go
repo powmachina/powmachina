@@ -93,10 +93,17 @@ func keyCreditAt(prefix byte, at uint64, payout [32]byte) []byte {
 	return b
 }
 
+// creditIndexVersion is the version of the indexes below; a directory whose mark carries another
+// builds them again. 2: the keys by their last share and the count.
+const creditIndexVersion = 2
+
+// creditIndexSpaces are the key spaces the indexes take.
+var creditIndexSpaces = []byte{prefixCreditNode, prefixCreditQueue, prefixCreditExpiry, prefixCreditDust, prefixCreditRecent}
+
 // creditIndexKeys are the index entries a credit has: its place in the payout queue, if it reached
-// its payout, and its expiry, in the dust space or the other.
+// its payout, its expiry, in the dust space or the other, and its last share.
 func creditIndexKeys(p [32]byte, c chain.Credit) [][]byte {
-	var out [][]byte
+	out := [][]byte{keyCreditAt(prefixCreditRecent, ^c.LastShare, p)}
 	if from, ok := chain.CreditQueueAt(c); ok {
 		out = append(out, keyCreditAt(prefixCreditQueue, from, p))
 	}
@@ -213,10 +220,63 @@ func (s *Store) CreditsRoot() [32]byte {
 	return root
 }
 
-// ForEachCredit walks the credit state of the applied tip — for RPC and the metrics, never for a
-// block.
+// ForEachCredit walks the whole credit state of the applied tip — for tests and the index build,
+// never for a block or a request.
 func (s *Store) ForEachCredit(fn func([32]byte, chain.Credit) error) error {
 	return forEachCredit(s.db, fn)
+}
+
+// CreditCount is how many keys hold a credit at the applied tip.
+func (s *Store) CreditCount() (int, error) { return readCreditCount(s.db) }
+
+func readCreditCount(r potReader) (int, error) {
+	v, closer, err := r.Get(keyCreditCount)
+	if errors.Is(err, pebble.ErrNotFound) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("store: %w", err)
+	}
+	defer closer.Close()
+	if len(v) != 8 {
+		return 0, fmt.Errorf("store: a corrupted credit count (%d B)", len(v))
+	}
+	return int(binary.LittleEndian.Uint64(v)), nil
+}
+
+func encodeCount(n int) []byte { return binary.LittleEndian.AppendUint64(nil, uint64(n)) }
+
+// RecentCredits reads the entries by their last share, the most recent first: at least `max` of
+// them, or all there are, and the rest of the last one's block too, so a caller that orders a block's
+// entries its own way cuts at the same place. Within a block they come by payout program.
+func (s *Store) RecentCredits(max int) ([]chain.CreditEntry, error) {
+	it, err := s.db.NewIter(&pebble.IterOptions{LowerBound: []byte{prefixCreditRecent}, UpperBound: []byte{prefixCreditRecent + 1}})
+	if err != nil {
+		return nil, fmt.Errorf("store: %w", err)
+	}
+	defer it.Close()
+	var out []chain.CreditEntry
+	for it.First(); it.Valid(); it.Next() {
+		k := it.Key()
+		if len(k) != 1+8+32 {
+			return nil, fmt.Errorf("store: a corrupted credit index key (%d B)", len(k))
+		}
+		last := ^binary.BigEndian.Uint64(k[1:9])
+		if len(out) >= max && (len(out) == 0 || out[len(out)-1].Credit.LastShare != last) {
+			break
+		}
+		var p [32]byte
+		copy(p[:], k[9:])
+		c, ok, err := readCredit(s.db, p)
+		if err != nil {
+			return nil, err
+		}
+		if !ok || c.LastShare != last {
+			return nil, fmt.Errorf("store: the credit index does not match the credit of %x", p[:6])
+		}
+		out = append(out, chain.CreditEntry{Payout: p, Credit: c})
+	}
+	return out, it.Error()
 }
 
 // Credit reads one payout program's entry.
@@ -302,6 +362,16 @@ func (p *pebbleBatch) PutCredit(payout [32]byte, c *chain.Credit) {
 			p.fail(p.b.Delete(k, nil))
 		}
 	}
+	if had != (c != nil) {
+		n, err := readCreditCount(p.b)
+		p.fail(err)
+		if c == nil {
+			n--
+		} else {
+			n++
+		}
+		p.fail(p.b.Set(keyCreditCount, encodeCount(n), nil))
+	}
 	if c == nil {
 		p.fail(p.b.Delete(keyCredit(payout), nil))
 		return
@@ -335,16 +405,17 @@ func revertCredits(batch *pebble.Batch, undo *chain.BlockUndo) error {
 }
 
 // ensureCreditIndex builds the credit state's indexes and its tree once, for a directory from
-// before them, and checks the tree against the root the state carries.
+// before them or from an older version of them, and checks the tree against the root the state
+// carries.
 func (s *Store) ensureCreditIndex() error {
-	if _, err := s.get(keyCreditIndexed); err == nil {
+	if v, err := s.get(keyCreditIndexed); err == nil && len(v) == 1 && v[0] == creditIndexVersion {
 		return nil
-	} else if !errors.Is(err, ErrNotFound) {
+	} else if err != nil && !errors.Is(err, ErrNotFound) {
 		return err
 	}
 	batch := s.db.NewBatch()
 	defer batch.Close()
-	for _, space := range []byte{prefixCreditNode, prefixCreditQueue, prefixCreditExpiry, prefixCreditDust} {
+	for _, space := range creditIndexSpaces {
 		if err := batch.DeleteRange([]byte{space}, []byte{space + 1}, nil); err != nil {
 			return fmt.Errorf("store: %w", err)
 		}
@@ -377,7 +448,10 @@ func (s *Store) ensureCreditIndex() error {
 			return fmt.Errorf("store: %w", err)
 		}
 	}
-	if err := batch.Set(keyCreditIndexed, []byte{1}, nil); err != nil {
+	if err := batch.Set(keyCreditCount, encodeCount(len(entries)), nil); err != nil {
+		return fmt.Errorf("store: %w", err)
+	}
+	if err := batch.Set(keyCreditIndexed, []byte{creditIndexVersion}, nil); err != nil {
 		return fmt.Errorf("store: %w", err)
 	}
 	return batch.Commit(pebble.Sync)

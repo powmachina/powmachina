@@ -59,6 +59,8 @@ const (
 	prefixCreditQueue  byte = 0x0D // <from:8 BE><payout:32>      -> ∅
 	prefixCreditExpiry byte = 0x0E // <expiry:8 BE><payout:32>    -> ∅ (the credit is not dust)
 	prefixCreditDust   byte = 0x0F // <expiry:8 BE><payout:32>    -> ∅ (the credit is dust)
+	// For RPC, not for blocks: the keys by their last share, the most recent first.
+	prefixCreditRecent byte = 0x10 // <^last share:8 BE><payout:32> -> ∅
 	prefixMeta         byte = 0xFF // the meta keys below
 )
 
@@ -78,9 +80,12 @@ var (
 	// reindex is started at startup — an index covering only part of the history would return "not
 	// found" for older transactions, and that looks like a valid answer.
 	keyTxIndexed = []byte{prefixMeta, 't', 'x', 'i', 'd', 'x'}
-	// keyCreditIndexed is the mark that the credit state's indexes cover it. A directory from
-	// before them builds them once when it opens (ensureCreditIndex).
+	// keyCreditIndexed is the mark that the credit state's indexes cover it, with the version of
+	// the indexes (creditIndexVersion). A directory from before them, or from an older version,
+	// builds them once when it opens (ensureCreditIndex).
 	keyCreditIndexed = []byte{prefixMeta, 'c', 'i', 'd', 'x'}
+	// keyCreditCount is how many keys hold a credit (8 B LE), kept with the indexes.
+	keyCreditCount = []byte{prefixMeta, 'c', 'c', 'n', 't'}
 	// keyAddrIndexed is the same mark for the address index.
 	keyAddrIndexed = []byte{prefixMeta, 'a', 'd', 'i', 'd', 'x'}
 )

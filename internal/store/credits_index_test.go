@@ -110,7 +110,7 @@ func TestCreditIndexesFollowTheState(t *testing.T) {
 func dumpCredits(t *testing.T, s *Store) map[string]string {
 	t.Helper()
 	out := map[string]string{}
-	it, err := s.db.NewIter(&pebble.IterOptions{LowerBound: []byte{prefixCredit}, UpperBound: []byte{prefixCreditDust + 1}})
+	it, err := s.db.NewIter(&pebble.IterOptions{LowerBound: []byte{prefixCredit}, UpperBound: []byte{prefixCreditRecent + 1}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,6 +125,11 @@ func dumpCredits(t *testing.T, s *Store) map[string]string {
 		t.Fatal(err)
 	}
 	out["pot"] = string(encodePot(pot, root))
+	n, err := s.CreditCount()
+	if err != nil {
+		t.Fatal(err)
+	}
+	out["count"] = string(encodeCount(n))
 	return out
 }
 
@@ -152,7 +157,7 @@ func checkCreditIndexes(t *testing.T, s *Store, h uint64) {
 		want[string(keyCreditNode(k))+string(n[:])] = true
 	}
 	got := map[string]bool{}
-	it, _ := s.db.NewIter(&pebble.IterOptions{LowerBound: []byte{prefixCreditNode}, UpperBound: []byte{prefixCreditDust + 1}})
+	it, _ := s.db.NewIter(&pebble.IterOptions{LowerBound: []byte{prefixCreditNode}, UpperBound: []byte{prefixCreditRecent + 1}})
 	for it.First(); it.Valid(); it.Next() {
 		k := string(it.Key())
 		if it.Key()[0] == prefixCreditNode {
@@ -163,6 +168,33 @@ func checkCreditIndexes(t *testing.T, s *Store, h uint64) {
 	it.Close()
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("height %d: %d index entries on disk, the state says %d", h, len(got), len(want))
+	}
+	if n, err := s.CreditCount(); err != nil || n != len(entries) {
+		t.Fatalf("height %d: the count says %d, the state has %d (%v)", h, n, len(entries), err)
+	}
+	// By the last share, the most recent first; a cut takes the cut block whole.
+	byLast := slices.Clone(entries)
+	slices.SortFunc(byLast, func(a, b chain.CreditEntry) int {
+		if a.Credit.LastShare != b.Credit.LastShare {
+			if a.Credit.LastShare > b.Credit.LastShare {
+				return -1
+			}
+			return 1
+		}
+		return bytes.Compare(a.Payout[:], b.Payout[:])
+	})
+	for _, max := range []int{0, 1, 3, len(entries), len(entries) + 1} {
+		got, err := s.RecentCredits(max)
+		if err != nil {
+			t.Fatal(err)
+		}
+		n := min(max, len(byLast))
+		for n > 0 && n < len(byLast) && byLast[n].Credit.LastShare == byLast[n-1].Credit.LastShare {
+			n++
+		}
+		if !reflect.DeepEqual(got, byLast[:n]) && !(n == 0 && len(got) == 0) {
+			t.Fatalf("height %d: the %d most recent: %d entries, the state says %d", h, max, len(got), n)
+		}
 	}
 	// The queues read in order and in full.
 	for _, at := range []uint64{h, h + chain.InactiveBlocks} {
@@ -218,7 +250,7 @@ func TestCreditIndexBuiltOnOpen(t *testing.T) {
 	batch.Set(keyPot, encodePot(77, chain.CreditsRoot(77, state)), nil)
 	// What an older node left: the entries and the pot, no indexes, no mark.
 	batch.Delete(keyCreditIndexed, nil)
-	for _, sp := range []byte{prefixCreditNode, prefixCreditQueue, prefixCreditExpiry, prefixCreditDust} {
+	for _, sp := range creditIndexSpaces {
 		batch.DeleteRange([]byte{sp}, []byte{sp + 1}, nil)
 	}
 	if err := batch.Commit(pebble.Sync); err != nil {
@@ -231,6 +263,15 @@ func TestCreditIndexBuiltOnOpen(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
+	checkCreditIndexes(t, s, 1000)
+
+	// A mark from an older version of the indexes builds them again.
+	s.db.Set(keyCreditIndexed, []byte{1}, pebble.Sync)
+	s.db.DeleteRange([]byte{prefixCreditRecent}, []byte{prefixCreditRecent + 1}, pebble.Sync)
+	s.db.Delete(keyCreditCount, pebble.Sync)
+	if err := s.ensureCreditIndex(); err != nil {
+		t.Fatal(err)
+	}
 	checkCreditIndexes(t, s, 1000)
 
 	// A state that does not match its root is refused, not indexed.
