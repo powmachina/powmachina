@@ -167,8 +167,9 @@ func TestMinerPublishesShares(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- m.Run(feed, quit) }()
 	// On regtest most shares of weight 11 are blocks too (its share target is ~1.5× the block's),
-	// so the test waits for one that is not.
-	deadline := time.Now().Add(2 * time.Minute)
+	// so the test waits for one that is not. Under the race detector two minutes gave six shares,
+	// all of them blocks, now and then; the wait ends as soon as one comes anyway.
+	deadline := time.Now().Add(5 * time.Minute)
 	for {
 		node.mu.Lock()
 		blocks, shares := len(node.got), len(node.shares)
@@ -177,7 +178,7 @@ func TestMinerPublishesShares(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("%d blocks and %d shares in 2 minutes", blocks, shares)
+			t.Fatalf("%d blocks and %d shares in 5 minutes", blocks, shares)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
