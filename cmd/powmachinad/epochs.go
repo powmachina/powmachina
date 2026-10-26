@@ -72,12 +72,16 @@ func (s *epochSet) close() {
 type dagMode int
 
 const (
-	// dagAuto: the full DAG during the initial sync (hundreds of thousands of headers), light at the tip.
+	// dagAuto: settled at start by the memory there is (dagModeFor) — full where it fits, light
+	// otherwise; where the system does not say, dagSync.
 	dagAuto dagMode = iota
-	// dagFull: always full — a miner and a pool that hashes itself.
+	// dagFull: always full — a miner, a pool, an exchange: every share verified.
 	dagFull
 	// dagLight: always light — a machine with little RAM. The initial sync is slower (~2 h per year of history).
 	dagLight
+	// dagSync: the full DAG during the initial sync (hundreds of thousands of headers), light at
+	// the tip — a wallet's node, which checks a sample of the shares and keeps 26 MiB at the tip.
+	dagSync
 )
 
 func parseDagMode(s string) (dagMode, error) {
@@ -88,12 +92,14 @@ func parseDagMode(s string) (dagMode, error) {
 		return dagFull, nil
 	case "light":
 		return dagLight, nil
+	case "sync":
+		return dagSync, nil
 	}
-	return 0, fmt.Errorf("unknown mode %q (auto, full, light)", s)
+	return 0, fmt.Errorf("unknown mode %q (auto, full, light, sync)", s)
 }
 
 func (m dagMode) String() string {
-	return [...]string{"auto", "full", "light"}[m]
+	return [...]string{"auto", "full", "light", "sync"}[m]
 }
 
 type epochCache struct {
@@ -104,7 +110,7 @@ type epochCache struct {
 	order []uint64
 
 	mode dagMode
-	// syncing (only for dagAuto) says whether the node is catching up on history. It is called
+	// syncing (only for dagSync) says whether the node is catching up on history. It is called
 	// under c.mu — it must not take a lock that forHeight is called under.
 	syncing func() bool
 	// full is the mode the built sets are in right now. Atomic, so a handshake does not wait

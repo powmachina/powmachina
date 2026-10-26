@@ -87,6 +87,9 @@ type Backend interface {
 	AllowedLanes() []mh.Lane
 	// StratumInfo is the devices connected to the node's stratum port.
 	StratumInfo() (any, error)
+	// ChecksEveryShare says whether the node verifies the PoW of every share a block settles (a
+	// full DAG) or a sample of them (light, the Sharepool spec §7).
+	ChecksEveryShare() bool
 	// SubmitBlock accepts a block from a miner.
 	SubmitBlock(blk *chain.Block) error
 	// SubmitShare takes a Sharepool share from a miner: it is verified, pooled and relayed. It
@@ -395,7 +398,18 @@ func (s *Server) getInfo() (any, error) {
 		"best_known":     bestKnown,
 		"applied_height": applied,
 		"synced":         applied >= height && (bestKnown == 0 || height >= bestKnown),
+		// settlement_check: "all" — the node verifies the PoW of every share the blocks settle;
+		// "sampled" — a light node, it checks a few at random and takes the rest on trust. An
+		// exchange, a pool and a miner want "all".
+		"settlement_check": settlementCheck(s.backend.ChecksEveryShare()),
 	}, nil
+}
+
+func settlementCheck(all bool) string {
+	if all {
+		return "all"
+	}
+	return "sampled"
 }
 
 // getFinality is what an exchange looks at before crediting a deposit. `finalized`, `height` and

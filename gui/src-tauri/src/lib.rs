@@ -350,9 +350,10 @@ pub fn run() {
 /// spawn_node starts our own node. It runs **without `-listen`** (outbound connections
 /// only), so it asks for no firewall hole and Windows stays quiet.
 ///
-/// `-dag=auto` is a trade-off worth knowing: while catching up the node builds the full DAG
-/// (~1 GiB, 0.62 ms per header) and drops to light at the tip (26 MiB, 63 ms). `POWM_DAG=light`
-/// stays frugal the whole time — good on an old laptop, at the price of a slower first sync.
+/// `-dag=sync` is a trade-off worth knowing: while catching up the node builds the full DAG
+/// (~1 GiB, 0.62 ms per header) and drops to light at the tip (26 MiB, 63 ms), where it checks a
+/// sample of the shares a block settles. `POWM_DAG=light` stays frugal the whole time — good on an
+/// old laptop, at the price of a slower first sync; `POWM_DAG=full` verifies every share (~3.5 GiB).
 fn spawn_node(
     handle: &tauri::AppHandle,
     net: &str,
@@ -362,7 +363,7 @@ fn spawn_node(
     let dag = match std::env::var("POWM_DAG").unwrap_or_default().as_str() {
         "light" => "light",
         "full" => "full",
-        _ => "auto",
+        _ => "sync",
     };
     let (mut rx, child) = handle
         .shell()

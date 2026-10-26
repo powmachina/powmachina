@@ -61,14 +61,14 @@ func TestEpochCacheEvicts(t *testing.T) {
 	}
 }
 
-// Auto mode: the full DAG during a sync, once caught up to the tip every held epoch switches to
+// Sync mode: the full DAG during a sync, once caught up to the tip every held epoch switches to
 // light (the dataset is freed) and after another long outage back to full. PoW verification has
 // to give the same result in both modes.
 func TestEpochCacheAutoSwitchesDag(t *testing.T) {
 	c := newEpochCache(mh.TestProfile)
 	defer c.close()
 	syncing := true
-	c.setMode(dagAuto, func() bool { return syncing })
+	c.setMode(dagSync, func() bool { return syncing })
 
 	h := &chain.Header{Version: 1, Height: 7, Bits: chain.RegtestTargetBits, Lane: mh.LaneG}
 	s0, err := c.forHeight(0)

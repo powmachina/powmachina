@@ -3,7 +3,8 @@ package main
 import "testing"
 
 // The auto mode builds the full DAG only where it fits: on a small machine the system would kill
-// the node halfway through the build (a 4 GB VM: "The node stopped" in the wallet).
+// the node halfway through the build (a 4 GB VM: "The node stopped" in the wallet). Where it fits,
+// the node stays full at the tip and verifies every share.
 func TestAutoModeStaysLightWithoutTheMemory(t *testing.T) {
 	cases := []struct {
 		mode  dagMode
@@ -12,8 +13,11 @@ func TestAutoModeStaysLightWithoutTheMemory(t *testing.T) {
 		want  dagMode
 	}{
 		{dagAuto, 3 << 30, true, dagLight},
-		{dagAuto, autoFullMemory, true, dagAuto},
-		{dagAuto, 0, false, dagAuto}, // the system does not say: as before
+		{dagAuto, autoFullMemory, true, dagFull},
+		{dagAuto, 0, false, dagSync}, // the system does not say: full while catching up, light at the tip
+		{dagSync, 3 << 30, true, dagLight},
+		{dagSync, autoFullMemory, true, dagSync},
+		{dagSync, 0, false, dagSync},
 		{dagFull, 1 << 30, true, dagFull},
 		{dagLight, 64 << 30, true, dagLight},
 	}

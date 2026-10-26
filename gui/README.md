@@ -29,9 +29,10 @@ else's server also trusts it about *what it received*, because it does not verif
 work on the blocks it is handed. The node runs without `-listen` (outbound connections only),
 so it needs no firewall hole.
 
-`-dag=auto` is the default: while catching up it builds the full DAG (~1 GiB, 0.62 ms per
+`-dag=sync` is the default: while catching up it builds the full DAG (~1 GiB, 0.62 ms per
 header; with RandomX's dataset the node peaks at ~4.7 GiB) and drops to light at the tip (26 MiB,
-63 ms). With less than 6 GiB of memory available it stays light from the start. `POWM_DAG=light` stays frugal the
+63 ms), where it checks a sample of the shares a block settles. With less than 6 GiB of memory
+available it stays light from the start. `POWM_DAG=full` verifies every share (~3.5 GiB). `POWM_DAG=light` stays frugal the
 whole time, at the price of a slower first sync. `POWM_NODE=host:port` skips the bundled node
 and uses an existing one (then `POWM_RPC_TOKEN` is required).
 

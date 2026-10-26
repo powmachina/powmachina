@@ -179,6 +179,7 @@ func (f *fakeBackend) FinalityStatus() FinalityStatus {
 		PendingBlock: [32]byte{8}, Members: 3, Total: 1000, Signed: 700, Own: 250}
 }
 func (f *fakeBackend) StratumInfo() (any, error) { return nil, errors.New("no") }
+func (f *fakeBackend) ChecksEveryShare() bool    { return true }
 func (f *fakeBackend) HashrateSeries(_, _, _ int) chain.HashrateSeries {
 	return chain.HashrateSeries{WindowBlocks: 12, Lanes: map[mh.Lane][]chain.HashratePoint{
 		mh.LaneC: {{Time: 1_800_000_000, Hashrate: big.NewInt(12_345)}},
@@ -243,6 +244,10 @@ func TestGetInfo(t *testing.T) {
 	// The node has to report which epoch it is in.
 	if _, ok := res["epoch"]; !ok {
 		t.Fatal("getinfo has to report epoch")
+	}
+	// Whether the node verifies every share or a sample: what an exchange checks before it trusts it.
+	if res["settlement_check"] != "all" {
+		t.Fatalf("settlement_check: %v", res["settlement_check"])
 	}
 }
 

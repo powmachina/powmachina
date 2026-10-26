@@ -57,6 +57,9 @@ func (n *Node) SetStratum(s *stratum.Server) {
 	n.stratumKick.Store(s)
 }
 
+// ChecksEveryShare implements rpc.Backend: a node with the full DAG verifies every share.
+func (n *Node) ChecksEveryShare() bool { return n.epochs.isFull() }
+
 // StratumInfo implements rpc.Backend.
 func (n *Node) StratumInfo() (any, error) {
 	n.mu.Lock()
