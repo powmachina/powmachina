@@ -61,7 +61,7 @@ func (n *Node) FinalityStatus() rpc.FinalityStatus {
 	if n.finality == nil {
 		return rpc.FinalityStatus{}
 	}
-	st := rpc.FinalityStatus{Enabled: true, Window: n.params.FinalityWindow, Key: n.FinalityKey(),
+	st := rpc.FinalityStatus{Enabled: true, Window: n.params.FinalityWindow, Active: n.params.FinalityActive, Key: n.FinalityKey(),
 		Caught: len(n.finality.Caught())}
 	_, tip, _ := n.chain.Tip()
 	if tip < chain.FinalityDepth {

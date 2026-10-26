@@ -104,7 +104,7 @@ func (n *Node) quorumAt(height uint64) *chain.Quorum {
 	if ok {
 		return q
 	}
-	q = chain.QuorumFor(height, n.params.FinalityWindow, n.seatAt)
+	q = chain.QuorumFor(height, n.params.FinalityWindow, n.params.FinalityActive, n.seatAt)
 	if q == nil {
 		return nil
 	}

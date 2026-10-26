@@ -161,6 +161,8 @@ type Payout struct {
 type FinalityStatus struct {
 	Enabled bool
 	Window  uint64
+	// Active is how recently a key has to have mined to keep its seat (0 = every key of the window).
+	Active uint64
 	// Key is the node's own finality key, nil when it has none.
 	Key *[32]byte
 	// Pending is the block at the finality depth below the tip: what the quorum is signing now.
@@ -429,6 +431,9 @@ func (s *Server) getFinality() (any, error) {
 	out["enabled"] = true
 	out["depth"] = chain.FinalityDepth
 	out["window"] = st.Window
+	if st.Active > 0 {
+		out["active"] = st.Active
+	}
 	out["threshold"] = fmt.Sprintf("more than %d/%d", chain.FinalityNum, chain.FinalityDen)
 	if st.Key != nil {
 		out["key"] = hex.EncodeToString(st.Key[:])

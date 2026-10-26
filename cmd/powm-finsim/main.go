@@ -47,10 +47,16 @@ type miner struct {
 type candidate struct {
 	window    int
 	threshold [2]int // numerator, denominator: more than num/den of the weight
+	// active: a key without a block in this many blocks below the target has no seat (0 = off).
+	active int
 }
 
 func (c candidate) String() string {
-	return fmt.Sprintf("W=%d T>%d/%d", c.window, c.threshold[0], c.threshold[1])
+	s := fmt.Sprintf("W=%d T>%d/%d", c.window, c.threshold[0], c.threshold[1])
+	if c.active > 0 {
+		s += fmt.Sprintf(" A=%d", c.active)
+	}
+	return s
 }
 
 type scenario struct {
@@ -184,10 +190,11 @@ var scenarios = []scenario{
 }
 
 var candidates = []candidate{
-	{720, [2]int{1, 2}}, {720, [2]int{2, 3}},
-	{1440, [2]int{1, 2}}, {1440, [2]int{2, 3}},
-	{2880, [2]int{1, 2}}, {2880, [2]int{2, 3}},
-	{5760, [2]int{1, 2}}, {5760, [2]int{2, 3}},
+	{720, [2]int{1, 2}, 0}, {720, [2]int{2, 3}, 0},
+	{1440, [2]int{1, 2}, 0}, {1440, [2]int{2, 3}, 0},
+	{2880, [2]int{1, 2}, 0}, {2880, [2]int{2, 3}, 0},
+	{5760, [2]int{1, 2}, 0}, {5760, [2]int{2, 3}, 0},
+	{window: 2880, threshold: [2]int{2, 3}, active: 360}, {window: 2880, threshold: [2]int{2, 3}, active: 720},
 }
 
 // run simulates one chain: the lanes take turns, a block's miner is drawn by hashrate share in its
@@ -229,8 +236,16 @@ func run(sc scenario, c candidate, rng *rand.Rand) result {
 				nLane[b%2]++
 			}
 			// Each lane holds half of the weight: a block of lane C weighs nG, a block of lane G nC.
+			// Who mined in the last `active` blocks keeps a seat.
+			recent := map[int]bool{}
+			for b := max(from, target-c.active); c.active > 0 && b < target; b++ {
+				recent[author[b]] = true
+			}
 			var signed, all int
 			for i := range miners {
+				if c.active > 0 && !recent[i] {
+					continue
+				}
 				w := blocks[laneC][i]*nLane[laneG] + blocks[laneG][i]*nLane[laneC]
 				all += w
 				if miners[i].signs(t) {

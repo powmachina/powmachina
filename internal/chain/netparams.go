@@ -50,6 +50,9 @@ type NetParams struct {
 	// FinalityWindow is how many blocks below a height make up the quorum that finalizes it
 	// (the finality spec). 0 = finality is off and the chain runs on plain PoW.
 	FinalityWindow uint64
+	// FinalityActive is how recently a key has to have mined to keep its seat (QuorumFor); 0 keeps
+	// every key of the window.
+	FinalityActive uint64
 
 	// MinChainWork is the smallest cumulative chainwork a chain has to have for the node to treat
 	// it as trustworthy (hex, empty = not checked).
@@ -98,6 +101,7 @@ var (
 		DevFeeKey: nil,
 		// TODO(before genesis): finality quorum keys from independent operators.
 		FinalityWindow: FinalityWindow,
+		FinalityActive: FinalityActive,
 		// A new network starts with every rule on.
 		Forks: []ForkAt{
 			{Fork: ForkWitnessCommitment, Height: 0},
@@ -130,6 +134,7 @@ var (
 		DevFeeKey:    placeholderKey("testnet"),
 		// The same window as mainnet, so testnet exercises exactly those paths (the finality spec).
 		FinalityWindow: FinalityWindow,
+		FinalityActive: FinalityActive,
 		// Both values are produced by `scripts/bake-checkpoint.sh` and are re-baked before every
 		// release: the deeper the checkpoint, the less history can be slipped to a node syncing
 		// for the first time. The checkpoint sits on a block the finality quorum confirmed and

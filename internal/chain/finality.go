@@ -40,6 +40,11 @@ const (
 	FinalityWindow uint64 = 2_880
 	// RegtestFinalityWindow is the window on regtest, short so that a test reaches finality.
 	RegtestFinalityWindow uint64 = 10
+	// FinalityActive is how recently a key has to have mined a block to keep its seat (360 blocks
+	// ≈ 3 h). A miner that stops — gone, or switched off — signs nothing, and its blocks would
+	// hold finality still until they left the window, a day later. Its seat goes after three hours
+	// instead: from its weight and from the whole. It is read off the chain, so every node agrees.
+	FinalityActive uint64 = 360
 	// A block is final when the keys that signed it hold more than FinalityNum/FinalityDen of the
 	// quorum's weight. Two thirds: two conflicting blocks can only both be final if more than a
 	// third of the weight signed both, and a key that does that is caught (Equivocation).
@@ -82,16 +87,28 @@ type Quorum struct {
 // however much hashrate they bring. A block without a key weighs as much as any other and
 // belongs to nobody, so it counts as a signature that never comes.
 //
+// A key without a block in the `active` blocks below the height has no seat: its weight leaves
+// the quorum and the whole alike, so a miner that stopped holds finality still for `active` blocks,
+// not for the window. The keyless blocks go the same way, as one key. 0 keeps every key.
+//
 // There is no quorum (nil) until the window is full: in the chain's first day the first few miners
 // would be the whole quorum, and finality held by whoever was there first is worse than none.
-func QuorumFor(height, window uint64, seats SeatLookup) *Quorum {
+func QuorumFor(height, window, active uint64, seats SeatLookup) *Quorum {
 	if window == 0 || height <= window {
 		return nil
 	}
 	var count [len(mh.Lanes)]map[[32]byte]uint64
+	var keyless [len(mh.Lanes)]uint64
 	var n [len(mh.Lanes)]uint64
 	for i := range count {
 		count[i] = make(map[[32]byte]uint64)
+	}
+	// Who mined in the last `active` blocks keeps a seat; the keyless blocks count as one key.
+	recent := make(map[[32]byte]bool)
+	keylessRecent := false
+	since := uint64(0)
+	if active > 0 && active < window {
+		since = height - active
 	}
 	for h := height - window; h < height; h++ {
 		s, ok := seats(h)
@@ -100,9 +117,14 @@ func QuorumFor(height, window uint64, seats SeatLookup) *Quorum {
 		}
 		n[s.Lane]++
 		if !s.HasKey {
+			keyless[s.Lane]++
+			keylessRecent = keylessRecent || h >= since
 			continue
 		}
 		count[s.Lane][s.Key]++
+		if h >= since {
+			recent[s.Key] = true
+		}
 	}
 	// A lane without a block in the window leaves the whole weight to the other one.
 	var mult [len(mh.Lanes)]uint64
@@ -117,9 +139,14 @@ func QuorumFor(height, window uint64, seats SeatLookup) *Quorum {
 	q := &Quorum{Height: height, weight: make(map[[32]byte]uint64)}
 	for lane := range count {
 		for key, c := range count[lane] {
-			q.weight[key] += c * mult[lane]
+			if recent[key] {
+				q.weight[key] += c * mult[lane]
+				q.total += c * mult[lane]
+			}
 		}
-		q.total += n[lane] * mult[lane]
+		if keylessRecent {
+			q.total += keyless[lane] * mult[lane]
+		}
 	}
 	return q
 }

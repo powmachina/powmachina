@@ -65,7 +65,7 @@ const testWindow = 30
 
 // quorumsOf is the QuorumLookup of a test window.
 func quorumsOf(w window) QuorumLookup {
-	return func(h uint64) *Quorum { return QuorumFor(h, testWindow, w.lookup) }
+	return func(h uint64) *Quorum { return QuorumFor(h, testWindow, 0, w.lookup) }
 }
 
 // The key travels in the share commitment, under the block's PoW: a key changed in a copy of the
@@ -110,18 +110,18 @@ func TestWitnessCommitmentTakesNothingAfterIt(t *testing.T) {
 // No quorum before the window is full: the first miners of a chain would otherwise be all of it.
 func TestQuorumNeedsAFullWindow(t *testing.T) {
 	w := window{}.mined(0, 0, nil).mined(1, 100, finalityKey(1))
-	if q := QuorumFor(testWindow, testWindow, w.lookup); q != nil {
+	if q := QuorumFor(testWindow, testWindow, 0, w.lookup); q != nil {
 		t.Fatal("a quorum over a window that reaches the genesis")
 	}
-	if q := QuorumFor(testWindow+1, testWindow, w.lookup); q == nil {
+	if q := QuorumFor(testWindow+1, testWindow, 0, w.lookup); q == nil {
 		t.Fatal("no quorum over a full window")
 	}
-	if q := QuorumFor(200, 0, w.lookup); q != nil {
+	if q := QuorumFor(200, 0, 0, w.lookup); q != nil {
 		t.Fatal("a quorum on a network without finality")
 	}
 	// A height of the window that is not here yet means no quorum, not a smaller one.
 	delete(w, 50)
-	if q := QuorumFor(60, testWindow, w.lookup); q != nil {
+	if q := QuorumFor(60, testWindow, 0, w.lookup); q != nil {
 		t.Fatal("a quorum over a window with a hole")
 	}
 }
@@ -142,7 +142,7 @@ func TestQuorumWeighsTheLanesEqually(t *testing.T) {
 		}
 		w[h] = s
 	}
-	q := QuorumFor(91, testWindow, w.lookup)
+	q := QuorumFor(91, testWindow, 0, w.lookup)
 	if q.Weight(pubOf(gpu))*2 != q.Total() {
 		t.Fatalf("all of lane G weighs %d of %d", q.Weight(pubOf(gpu)), q.Total())
 	}
@@ -162,12 +162,46 @@ func TestQuorumWeighsTheLanesEqually(t *testing.T) {
 func TestKeylessBlocksCountAgainst(t *testing.T) {
 	a := finalityKey(1)
 	w := window{}.mined(1, 20, a).mined(21, 30, nil)
-	q := QuorumFor(31, testWindow, w.lookup)
+	q := QuorumFor(31, testWindow, 0, w.lookup)
 	if q.Members() != 1 || q.Weight(pubOf(a))*3 != q.Total()*2 {
 		t.Fatalf("two thirds with a key: weight %d of %d", q.Weight(pubOf(a)), q.Total())
 	}
 	if q.Enough(q.Weight(pubOf(a))) {
 		t.Fatal("exactly two thirds finalized — it takes more")
+	}
+}
+
+// A miner that stopped keeps no seat once it has not mined for `active` blocks: its weight leaves
+// the quorum and the whole, and the ones still mining can finalize without it. Before that it
+// still counts — a pause of a few blocks is no reason to drop anybody.
+func TestAStoppedMinerLosesItsSeat(t *testing.T) {
+	a, b, c := finalityKey(1), finalityKey(2), finalityKey(3)
+	// a mined 1–12 and stopped; b and c take turns after it.
+	w := window{}.mined(1, 12, a)
+	for h := uint64(13); h <= 30; h++ {
+		w.mined(h, h, []ed25519.PrivateKey{b, c}[h%2])
+	}
+	const active = 10
+	q := QuorumFor(31, testWindow, active, w.lookup)
+	if q.Weight(pubOf(a)) != 0 || q.Members() != 2 {
+		t.Fatalf("a stopped 19 blocks ago and still holds %d (%d members)", q.Weight(pubOf(a)), q.Members())
+	}
+	if q.Total() != q.Weight(pubOf(b))+q.Weight(pubOf(c)) || !q.Enough(q.Total()) {
+		t.Fatalf("the whole %d is not what b and c hold (%d + %d)", q.Total(), q.Weight(pubOf(b)), q.Weight(pubOf(c)))
+	}
+	// With every key of the window, a's 12 of 30 blocks keep b and c below two thirds.
+	if all := QuorumFor(31, testWindow, 0, w.lookup); all.Enough(all.Weight(pubOf(b)) + all.Weight(pubOf(c))) {
+		t.Fatal("without the rule b and c finalized alone")
+	}
+	// Mined 5 blocks ago: still in.
+	w.mined(26, 26, a)
+	if q := QuorumFor(31, testWindow, active, w.lookup); q.Weight(pubOf(a)) == 0 {
+		t.Fatal("a miner 5 blocks back lost its seat")
+	}
+	// Keyless blocks go the same way: old ones stop counting against.
+	k := window{}.mined(1, 12, nil).mined(13, 30, b)
+	if q := QuorumFor(31, testWindow, active, k.lookup); q.Total() != q.Weight(pubOf(b)) {
+		t.Fatalf("old keyless blocks still weigh: %d of %d", q.Weight(pubOf(b)), q.Total())
 	}
 }
 
