@@ -13,7 +13,7 @@ func (acceptPoW) VerifyPoW(*Header) (bool, error) { return true, nil }
 
 // mainChain builds an active branch of `n` blocks alternating C/G through LoadHeader (without the
 // checks) and returns it together with the IDs by height.
-func mainChain(t *testing.T, params NetParams, n int) (*HeaderChain, []*Header) {
+func mainChain(t testing.TB, params NetParams, n int) (*HeaderChain, []*Header) {
 	t.Helper()
 	g := RegtestGenesis()
 	hc := NewHeaderChain(params, g, nil)

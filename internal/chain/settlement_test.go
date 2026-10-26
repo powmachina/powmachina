@@ -12,7 +12,7 @@ var lowHash = fixedHash{0, 0, 0, 1}
 
 // settleChain is a chain of 40 blocks far from the floor and a builder of shares on its blocks:
 // share(depth, …) builds on the block `depth` below the next one, as a miner would have mined it.
-func settleChain(t *testing.T) (*HeaderChain, []*Header, func(depth int, key byte, lane mh.Lane, nonce uint64) *Share) {
+func settleChain(t testing.TB) (*HeaderChain, []*Header, func(depth int, key byte, lane mh.Lane, nonce uint64) *Share) {
 	t.Helper()
 	params := RegTest
 	params.PowLimitBits = MaxTargetBits
@@ -37,7 +37,7 @@ func settleChain(t *testing.T) (*HeaderChain, []*Header, func(depth int, key byt
 }
 
 // nextBlock is a block on the tip carrying `shares`, sealed.
-func nextBlock(t *testing.T, hs []*Header, shares ...*Share) *Block {
+func nextBlock(t testing.TB, hs []*Header, shares ...*Share) *Block {
 	t.Helper()
 	tip := hs[len(hs)-1]
 	s, err := NewSettlement(shares, uint64(tip.Height)+1)
