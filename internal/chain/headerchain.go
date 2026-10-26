@@ -188,6 +188,19 @@ func (hc *HeaderChain) HeaderByID(id [32]byte) (*Header, bool) {
 func (hc *HeaderChain) BlockIDAt(height uint64) ([32]byte, bool) {
 	hc.mu.RLock()
 	defer hc.mu.RUnlock()
+	return hc.blockIDAtLocked(height)
+}
+
+// HoldActive runs fn while the active branch cannot change, with a lookup into it that takes no
+// lock. It is what finality decides under: a block read from the branch is still on it when fn
+// files it as final. fn must not call back into the chain.
+func (hc *HeaderChain) HoldActive(fn func(ChainLookup)) {
+	hc.mu.RLock()
+	defer hc.mu.RUnlock()
+	fn(hc.blockIDAtLocked)
+}
+
+func (hc *HeaderChain) blockIDAtLocked(height uint64) ([32]byte, bool) {
 	for n := hc.tip; n != nil; n = hc.byID[n.header.PrevBlock] {
 		if n.height == height {
 			return n.id, true
@@ -261,7 +274,7 @@ func (hc *HeaderChain) checkLocked(h *Header, id [32]byte) (*node, error) {
 		if fork == nil {
 			return nil, ErrForkTooDeep
 		}
-		if hc.finality != nil && hc.finality.CheckReorg(fork.height) != nil {
+		if hc.leavesFinalityLocked(parent, fork) {
 			return nil, ErrForkTooDeep
 		}
 	}
@@ -352,10 +365,8 @@ func (hc *HeaderChain) maybeReorgLocked(candidate *node) (bool, error) {
 	if fork == nil {
 		return false, nil
 	}
-	if hc.finality != nil {
-		if err := hc.finality.CheckReorg(fork.height); err != nil {
-			return false, err
-		}
+	if hc.leavesFinalityLocked(candidate, fork) {
+		return false, ErrFinalityRewrite
 	}
 	age := int64(hc.tip.header.Time) - int64(fork.header.Time)
 	localWork := new(big.Int).Sub(hc.tip.work, fork.work)
@@ -365,6 +376,29 @@ func (hc *HeaderChain) maybeReorgLocked(candidate *node) (bool, error) {
 	}
 	hc.tip = candidate
 	return true, nil
+}
+
+// leavesFinalityLocked says whether the branch of `cand`, which leaves the active one at `fork`,
+// leaves the finalized block behind. A branch that holds the finalized block does not: it is the way
+// back to it once the tip has fallen below it — a finalized block whose body stalls is parked like
+// any other, and when the body comes the node has to be able to return.
+func (hc *HeaderChain) leavesFinalityLocked(cand, fork *node) bool {
+	if hc.finality == nil {
+		return false
+	}
+	height, id, ok := hc.finality.Finalized()
+	if !ok || fork.height >= height {
+		return false
+	}
+	for n := cand; n != nil && n.height >= height; n = hc.byID[n.header.PrevBlock] {
+		if n.height == height {
+			return n.id != id
+		}
+		if n.id == hc.genesis {
+			break
+		}
+	}
+	return true
 }
 
 // forkPointBoundedLocked finds the common ancestor of `from` and the active branch if it lies at

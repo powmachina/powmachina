@@ -201,7 +201,7 @@ func (n *Node) acceptEquivocation(ev *chain.Equivocation, from string) {
 func (n *Node) updateFinality() {
 	before, _, hadFinal := n.finality.Finalized()
 	_, height, _ := n.chain.Tip()
-	n.finality.Update(height, n.chain.BlockIDAt, n.quorumAt)
+	n.finality.UpdateOn(height, n.chain.BlockIDAt, n.quorumAt, n.chain.HoldActive)
 	if after, id, ok := n.finality.Finalized(); ok && (!hadFinal || after > before) {
 		log.Printf("finality advanced to height %d (%x)", after, id[:6])
 		n.saveFinality()

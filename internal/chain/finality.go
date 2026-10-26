@@ -373,6 +373,14 @@ func (f *FinalityState) signedLocked(height uint64, id [32]byte, q *Quorum) uint
 //
 // can be finalized.
 func (f *FinalityState) Update(tipHeight uint64, lookup ChainLookup, quorum QuorumLookup) {
+	f.UpdateOn(tipHeight, lookup, quorum, nil)
+}
+
+// UpdateOn is Update for a chain that keeps changing while it runs. The chain is read without any
+// lock, and a reorg can land before the decision: `hold` runs the decision while the active branch
+// cannot change (HeaderChain.HoldActive), and a block that is no longer on it is not finalized.
+// With nil the decision trusts what step 2 read — for a chain that does not change meanwhile.
+func (f *FinalityState) UpdateOn(tipHeight uint64, lookup ChainLookup, quorum QuorumLookup, hold func(func(ChainLookup))) {
 	if tipHeight < FinalityDepth {
 		return
 	}
@@ -409,22 +417,35 @@ func (f *FinalityState) Update(tipHeight uint64, lookup ChainLookup, quorum Quor
 		}
 	}
 
-	// 3. the decision under our lock, recomputed (the state may have changed in the meantime)
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	for _, h := range heights {
-		c, ok := ours[h]
-		if !ok || (f.hasFinal && h <= f.finalized) {
-			continue
-		}
-		if c.q.Enough(f.signedLocked(h, c.id, c.q)) {
-			f.finalized = h
-			f.finalID = c.id
-			f.hasFinal = true
-			f.pruneBelow(h)
-			return // heights are sorted descending, so this is the highest finalized height
+	// 3. the decision under our lock, recomputed (the state may have changed in the meantime). The
+	//    chain's lock, when there is one, is taken first — the order CheckReorg takes them in.
+	decide := func(active ChainLookup) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		for _, h := range heights {
+			c, ok := ours[h]
+			if !ok || (f.hasFinal && h <= f.finalized) {
+				continue
+			}
+			if active != nil {
+				if id, ok := active(h); !ok || id != c.id {
+					continue // a reorg took the block off the active branch since step 2
+				}
+			}
+			if c.q.Enough(f.signedLocked(h, c.id, c.q)) {
+				f.finalized = h
+				f.finalID = c.id
+				f.hasFinal = true
+				f.pruneBelow(h)
+				return // heights are sorted descending, so this is the highest finalized height
+			}
 		}
 	}
+	if hold == nil {
+		decide(nil) // lookup may lock the chain, and not under our lock
+		return
+	}
+	hold(decide)
 }
 
 // Signed returns the weight that signed the block `id` at `height` — what the RPC shows while a
