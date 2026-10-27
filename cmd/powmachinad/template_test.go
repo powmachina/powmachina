@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/hex"
+	"errors"
 	"net"
 	"slices"
 	"sync"
@@ -11,6 +12,7 @@ import (
 	"powmachina/internal/chain"
 	"powmachina/internal/mh"
 	"powmachina/internal/p2p"
+	"powmachina/internal/work"
 )
 
 // What these tests guard: a found block thrown away by the node with `invalid body:
@@ -253,5 +255,47 @@ func TestBlockedLaneHasASharesOnlyTemplate(t *testing.T) {
 		}
 	} else if err == nil {
 		t.Fatal("a light node gave a shares-only template")
+	}
+}
+
+// A node that is still catching up hands out no work: its tip is old and a peer reports a longer
+// chain. A block found on such a tip loses to the chain it has not downloaded yet, and its shares
+// never settle — on the testnet a node stuck 7 000 blocks behind kept its miner busy for hours.
+func TestNoWorkWhileTheNodeIsBehind(t *testing.T) {
+	node := NewNode(chain.RegTest, chain.RegtestGenesis(), mh.TestProfile)
+	defer node.Close()
+	anyTemplate := func() error {
+		var err error
+		for _, lane := range []mh.Lane{mh.LaneG, mh.LaneC} {
+			if _, err = node.Template(lane); err == nil {
+				return nil
+			}
+		}
+		return err
+	}
+
+	// The genesis is years old, but nobody reports more: a network that stopped must be able to
+	// start again.
+	if err := anyTemplate(); err != nil {
+		t.Fatalf("no peers, an old tip: the work has to be there, got %v", err)
+	}
+
+	peer := p2p.NewPeer(p2p.Address{IP: net.ParseIP("88.198.113.7"), Port: 17696}, p2p.PeerOutboundFull)
+	if err := peer.CompleteHandshake(&p2p.VersionMsg{Protocol: p2p.ProtocolVersion, Nonce: 7,
+		StartHeight: 5}, node.nonce); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := node.peers.Add(peer); err != nil {
+		t.Fatal(err)
+	}
+	if err := anyTemplate(); !errors.Is(err, work.ErrSyncing) {
+		t.Fatalf("an old tip and a peer at 5: want %v, got %v", work.ErrSyncing, err)
+	}
+
+	// A fresh tip is the node's own; a peer reporting more does not stop it.
+	_, _, tip := node.chain.Tip()
+	h, _ := node.chain.HeaderByID(tip)
+	if node.behindTheNetwork(h.Timestamp().Add(staleTipAge - time.Minute)) {
+		t.Fatal("a tip younger than staleTipAge is not behind")
 	}
 }

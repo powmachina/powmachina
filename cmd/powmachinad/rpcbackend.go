@@ -110,6 +110,27 @@ func (n *Node) SyncState() (int, uint64, uint64) {
 	return peers, best, applied
 }
 
+// staleTipAge is how old the tip may be before a peer that reports more makes the node one that is
+// catching up. With a block every 30 s and the rotation relief at 15 min, an hour without a block
+// is a node that has fallen behind or a network that has stopped.
+const staleTipAge = time.Hour
+
+// behindTheNetwork says whether the node is still catching up: its tip is old and a peer reports a
+// longer chain. Work on such a tip is wasted — a block found on it loses to the chain the node has
+// not downloaded yet, and its shares never settle.
+//
+// Both conditions, so a network that has stopped can start again: its tip is old too, but nobody
+// reports more. The height comes from strangers; one that lies can only hold back a node whose
+// tip is already an hour old.
+func (n *Node) behindTheNetwork(now time.Time) bool {
+	tip, height, _ := n.chain.Tip()
+	if now.Sub(tip.Timestamp()) < staleTipAge {
+		return false
+	}
+	_, best := n.peers.PeerHeights()
+	return best > height
+}
+
 // HashrateSeries implements rpc.Backend.
 func (n *Node) HashrateSeries(blocks, window, points int) chain.HashrateSeries {
 	return n.chain.HashrateSeries(blocks, window, points)
@@ -180,6 +201,9 @@ func (n *Node) template(lane mh.Lane, sharesOnly bool) (*rpc.Template, error) {
 	// network is known to have: it is either still being downloaded or it is not the network's.
 	if !n.chain.Anchored() {
 		return nil, errors.New("the chain is below the network's checkpoints — no work until it has synced")
+	}
+	if n.behindTheNetwork(time.Now()) {
+		return nil, work.ErrSyncing
 	}
 
 	tip, height, tipID := n.chain.Tip()

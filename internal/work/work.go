@@ -103,6 +103,10 @@ type Job struct {
 // ErrChainAhead: the chain's time is ahead of the clock by more than the node allows — it would refuse the block.
 var ErrChainAhead = errors.New("chain time is ahead of the clock — waiting")
 
+// ErrSyncing: the node's tip is old and its peers report a longer chain — it is still catching up
+// and has no work until it gets there.
+var ErrSyncing = errors.New("the node is still syncing — no work until it reaches the tip")
+
 // ErrTipNotApplied: the node has the new tip's header but not yet its body applied, so it has no
 // work on that tip for a few moments. Whoever has a job on the block below keeps mining it —
 // that is the last block the node verified — and takes a new one once the tip is applied.
