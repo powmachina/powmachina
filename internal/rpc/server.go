@@ -14,6 +14,8 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"mime"
+	"net"
 	"net/http"
 	"sort"
 	"strings"
@@ -222,6 +224,32 @@ func (s *Server) HTTPServer(addr string) *http.Server {
 	}
 }
 
+// hostIsLocal accepts the Host header of a request that reached the loopback listener directly: an
+// empty host, `localhost`, or any IP literal (with or without a port). It rejects a registered domain
+// name, which is how a DNS-rebinding attack dresses up a request aimed at 127.0.0.1.
+func hostIsLocal(host string) bool {
+	if host == "" {
+		return true
+	}
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	if host == "localhost" {
+		return true
+	}
+	return net.ParseIP(host) != nil
+}
+
+// isJSONContentType reports whether the media type is application/json (parameters such as a charset
+// are allowed). Every real JSON-RPC client sends it; a cross-origin simple request cannot.
+func isJSONContentType(v string) bool {
+	if v == "" {
+		return false
+	}
+	mt, _, err := mime.ParseMediaType(v)
+	return err == nil && mt == "application/json"
+}
+
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
@@ -232,6 +260,22 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		want := "Bearer " + s.token
 		if subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
 			http.Error(w, "invalid token", http.StatusUnauthorized)
+			return
+		}
+	} else {
+		// Tokenless mode — the loopback default. Here a bearer token does not stand between a web page
+		// and the node, so defend against the two cross-origin tricks a browser allows: a malicious
+		// page POSTing here directly, and DNS rebinding a hostname onto 127.0.0.1. A JSON content type
+		// cannot be set on a simple cross-origin request without a CORS preflight (which this server
+		// never answers), and clients reach the node by IP or `localhost`, never a registered domain,
+		// so a hostname Host is the signature of a rebind. With a token set, the bearer check already
+		// stops both, so this does not apply and proxied/token setups keep working.
+		if !hostIsLocal(r.Host) {
+			http.Error(w, "host not allowed", http.StatusForbidden)
+			return
+		}
+		if !isJSONContentType(r.Header.Get("Content-Type")) {
+			http.Error(w, "Content-Type must be application/json", http.StatusUnsupportedMediaType)
 			return
 		}
 	}

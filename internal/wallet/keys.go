@@ -71,6 +71,22 @@ func newKeychain(seed []byte) (*keychain, error) {
 		derived: make(map[[32]byte]keyRef), secrets: make(map[[32]byte]*[32]byte)}, nil
 }
 
+// wipe zeroes the cached private keys, best effort — it shortens the window in which a leaked process
+// image holds usable keys. Go cannot guarantee the values were not already copied by the runtime (the
+// collector may move them), and the hd.Key parents are not reached: their secret material lives inside
+// the btcec structures this package does not own. Acknowledged in AUDIT.md.
+func (k *keychain) wipe() {
+	for _, sk := range k.secrets {
+		if sk != nil {
+			for i := range sk {
+				sk[i] = 0
+			}
+		}
+	}
+	clear(k.secrets)
+	clear(k.derived)
+}
+
 // ensure derives a branch's keys up to the index `upto` (exclusive).
 func (k *keychain) ensure(branch uint8, upto uint32) error {
 	parent, have := k.receive, &k.derivedRecv

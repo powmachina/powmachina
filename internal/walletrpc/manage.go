@@ -1,6 +1,7 @@
 package walletrpc
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -146,7 +147,7 @@ func (s *Server) loadWallet(a args) (any, error) {
 	}
 	w, err := wallet.Open(path, pass, s.params())
 	if err != nil {
-		if strings.Contains(err.Error(), "password") || strings.Contains(err.Error(), "password") {
+		if errors.Is(err, wallet.ErrWrongPassword) {
 			return nil, &rpcError{codeWrongPassphrase, err.Error()}
 		}
 		return nil, &rpcError{codeWalletError, err.Error()}

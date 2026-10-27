@@ -45,12 +45,17 @@ const (
 	saltBytes   = 16
 	headerBytes = 8 + 2 + 4 + 1 + 4 + 4 + 1 + saltBytes + 1 + chacha20poly1305.NonceSizeX + 4
 
-	// The parameter bounds when opening somebody else's file.
+	// The parameter bounds when opening a file. This build only ever writes DefaultKDF (256 MiB, 3, 4),
+	// so the ceilings sit a few multiples above that — enough headroom for a deliberately stronger
+	// wallet, low enough that a hostile file cannot make `open` spend gigabytes and minutes in Argon2id
+	// (a 4 GiB / 32-pass header used to pass the cheap parse and hang or OOM the opener). A file asking
+	// for more than this is refused with ErrBadParams before any key is derived.
 	minMemoryKiB = 8 << 10 // 8 MiB
-	maxMemoryKiB = 4 << 20 // 4 GiB
-	maxTime      = 32
-	maxThreads   = 64
+	maxMemoryKiB = 1 << 20 // 1 GiB
+	maxTime      = 10
+	maxThreads   = 8
 	maxSealed    = 1 << 30 // 1 GiB
+	maxFileBytes = headerBytes + maxSealed
 )
 
 // KDFParams are the Argon2id parameters.

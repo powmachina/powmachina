@@ -50,6 +50,12 @@ const (
 	// third of the weight signed both, and a key that does that is caught (Equivocation).
 	FinalityNum = 2
 	FinalityDen = 3
+	// MaxCaughtKeys caps the proofs of double signing the state holds in memory and persists. A caught
+	// key costs the attacker a seat earned with real PoW, so this is never reached in normal operation;
+	// it is only a backstop against unbounded growth over the chain's lifetime. When it is hit, the
+	// proof for the lowest height is dropped first — the one most likely already below the finalized
+	// line, where it can no longer influence an open height.
+	MaxCaughtKeys = 100_000
 )
 
 var finalityDomain = []byte("PowMachina/finality/v1")
@@ -105,7 +111,10 @@ func QuorumFor(height, window, active uint64, seats SeatLookup) *Quorum {
 	}
 	// Who mined in the last `active` blocks keeps a seat; the keyless blocks count as one key.
 	recent := make(map[[32]byte]bool)
-	keylessRecent := false
+	// Keyless recency is tracked per lane, the same way a keyed key keeps its seat only in the lane it
+	// mined. A recent keyless block in lane C must not drag lane G's stale keyless blocks into the
+	// quorum's total: that would enlarge the denominator and make finality harder for no reason.
+	var keylessRecent [len(mh.Lanes)]bool
 	since := uint64(0)
 	if active > 0 && active < window {
 		since = height - active
@@ -118,7 +127,9 @@ func QuorumFor(height, window, active uint64, seats SeatLookup) *Quorum {
 		n[s.Lane]++
 		if !s.HasKey {
 			keyless[s.Lane]++
-			keylessRecent = keylessRecent || h >= since
+			if h >= since {
+				keylessRecent[s.Lane] = true
+			}
 			continue
 		}
 		count[s.Lane][s.Key]++
@@ -144,7 +155,7 @@ func QuorumFor(height, window, active uint64, seats SeatLookup) *Quorum {
 				q.total += c * mult[lane]
 			}
 		}
-		if keylessRecent {
+		if keylessRecent[lane] {
 			q.total += keyless[lane] * mult[lane]
 		}
 	}
@@ -188,10 +199,14 @@ type Attestation struct {
 	Signature []byte
 }
 
-// AttestationMessage is what gets signed. The domain prevents the signature from being carried elsewhere.
-func AttestationMessage(height uint64, blockID [32]byte) []byte {
-	msg := make([]byte, 0, len(finalityDomain)+8+32)
+// AttestationMessage is what gets signed. The domain prevents the signature from being carried to
+// another protocol; the genesis id binds it to one chain, so a signature made on testnet or regtest
+// can never verify on mainnet (or across a reset), even if the heights and block ids happened to line
+// up.
+func AttestationMessage(genesisID [32]byte, height uint64, blockID [32]byte) []byte {
+	msg := make([]byte, 0, len(finalityDomain)+32+8+32)
 	msg = append(msg, finalityDomain...)
+	msg = append(msg, genesisID[:]...)
 	var h [8]byte
 	binary.LittleEndian.PutUint64(h[:], height)
 	msg = append(msg, h[:]...)
@@ -199,18 +214,18 @@ func AttestationMessage(height uint64, blockID [32]byte) []byte {
 	return msg
 }
 
-// Verify checks the signature against the key the attestation names.
-func (a *Attestation) Verify() error {
+// Verify checks the signature against the key the attestation names, on the chain `genesisID` roots.
+func (a *Attestation) Verify(genesisID [32]byte) error {
 	if len(a.Signature) != ed25519.SignatureSize ||
-		!ed25519.Verify(ed25519.PublicKey(a.Key[:]), AttestationMessage(a.Height, a.BlockID), a.Signature) {
+		!ed25519.Verify(ed25519.PublicKey(a.Key[:]), AttestationMessage(genesisID, a.Height, a.BlockID), a.Signature) {
 		return ErrBadSignature
 	}
 	return nil
 }
 
-// Sign creates an attestation with a miner's finality key.
-func Sign(priv ed25519.PrivateKey, height uint64, blockID [32]byte) Attestation {
-	a := Attestation{Height: height, BlockID: blockID, Signature: ed25519.Sign(priv, AttestationMessage(height, blockID))}
+// Sign creates an attestation with a miner's finality key, bound to the chain `genesisID` roots.
+func Sign(priv ed25519.PrivateKey, genesisID [32]byte, height uint64, blockID [32]byte) Attestation {
+	a := Attestation{Height: height, BlockID: blockID, Signature: ed25519.Sign(priv, AttestationMessage(genesisID, height, blockID))}
 	copy(a.Key[:], priv.Public().(ed25519.PublicKey))
 	return a
 }
@@ -229,16 +244,17 @@ func (e *Equivocation) Error() string {
 		e.Key[:4], e.Height, e.First.BlockID[:4], e.Second.BlockID[:4])
 }
 
-// Verify checks that the proof is what it says: one key, one height, two blocks, two valid signatures.
-func (e *Equivocation) Verify() error {
+// Verify checks that the proof is what it says: one key, one height, two blocks, two valid signatures
+// on the chain `genesisID` roots.
+func (e *Equivocation) Verify(genesisID [32]byte) error {
 	if e.First.Key != e.Key || e.Second.Key != e.Key || e.First.Height != e.Height ||
 		e.Second.Height != e.Height || e.First.BlockID == e.Second.BlockID {
 		return ErrBadSignature
 	}
-	if err := e.First.Verify(); err != nil {
+	if err := e.First.Verify(genesisID); err != nil {
 		return err
 	}
-	return e.Second.Verify()
+	return e.Second.Verify(genesisID)
 }
 
 // ChainLookup returns the ID of the block the node has at a given height on its own active chain.
@@ -262,12 +278,14 @@ type attKey struct {
 // It is **safe for concurrent use**: attestations arrive from every peer's read loop and from the
 // node's own signer, so several goroutines push into the state at once.
 //
-// Mind the lock order: `CheckReorg` is called **under the header chain's lock**, so `FinalityState`
-// must not hold its own lock while it asks the chain. The quorum of an attestation is therefore
-// computed by the caller before Add, and `Update` first picks the candidates, releases the lock,
-// looks into the chain and only then decides.
+// Mind the lock order: the header chain reads this state's `Finalized()` **while holding its own
+// lock** (HeaderChain.leavesFinalityLocked, the guard that stops a reorg below a finalized block), so
+// `FinalityState` must not hold its own lock while it asks the chain, or the two would deadlock. The
+// quorum of an attestation is therefore computed by the caller before Add, and `Update` first picks
+// the candidates, releases the lock, looks into the chain and only then decides (UpdateOn's hold).
 type FinalityState struct {
 	mu        sync.RWMutex
+	genesisID [32]byte // the chain this state's attestations are bound to (AttestationMessage)
 	byHeight  map[uint64]map[[32]byte]Attestation
 	seen      map[attKey]bool
 	caught    map[[32]byte]*Equivocation // keys proven to have signed two blocks at one height
@@ -276,11 +294,12 @@ type FinalityState struct {
 	hasFinal  bool
 }
 
-func NewFinalityState() *FinalityState {
+func NewFinalityState(genesisID [32]byte) *FinalityState {
 	return &FinalityState{
-		byHeight: make(map[uint64]map[[32]byte]Attestation),
-		seen:     make(map[attKey]bool),
-		caught:   make(map[[32]byte]*Equivocation),
+		genesisID: genesisID,
+		byHeight:  make(map[uint64]map[[32]byte]Attestation),
+		seen:      make(map[attKey]bool),
+		caught:    make(map[[32]byte]*Equivocation),
 	}
 }
 
@@ -295,16 +314,35 @@ func (f *FinalityState) Add(a Attestation, q *Quorum) (*Equivocation, error) {
 	if q == nil || q.Height != a.Height || q.Weight(a.Key) == 0 {
 		return nil, ErrUnknownSigner
 	}
-	if err := a.Verify(); err != nil {
+	key := attKey{height: a.Height, key: a.Key, blockID: a.BlockID}
+
+	// Drop a duplicate or an already-finalized height before the signature check. ed25519 Verify is
+	// the expensive part; a valid attestation we already hold is dropped here without re-running it, so
+	// replaying one cannot force the check over and over — which is what amplified the finality DoS.
+	f.mu.Lock()
+	if a.Height <= f.finalized && f.hasFinal {
+		f.mu.Unlock()
+		return nil, ErrDuplicateAttestation // finalized heights are never recomputed
+	}
+	if f.seen[key] {
+		f.mu.Unlock()
+		return nil, ErrDuplicateAttestation
+	}
+	f.mu.Unlock()
+
+	// Verify off the lock, and only for an attestation we do not already hold.
+	if err := a.Verify(f.genesisID); err != nil {
 		return nil, err
 	}
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
+	// Re-check under the lock: another goroutine may have finalized the height or recorded the same
+	// attestation while this one was verifying.
 	if a.Height <= f.finalized && f.hasFinal {
-		return nil, ErrDuplicateAttestation // finalized heights are never recomputed
+		return nil, ErrDuplicateAttestation
 	}
-	key := attKey{height: a.Height, key: a.Key, blockID: a.BlockID}
 	if f.seen[key] {
 		return nil, ErrDuplicateAttestation
 	}
@@ -321,6 +359,7 @@ func (f *FinalityState) Add(a Attestation, q *Quorum) (*Equivocation, error) {
 		// so it can only make finality harder, never easier.
 		ev := &Equivocation{Key: a.Key, Height: a.Height, First: prev, Second: a}
 		if _, known := f.caught[a.Key]; !known {
+			f.evictCaughtIfFull()
 			f.caught[a.Key] = ev
 		}
 		return ev, ErrSignerConflict
@@ -338,7 +377,7 @@ func (f *FinalityState) AddEquivocation(e *Equivocation, q *Quorum) bool {
 	if q == nil || q.Height != e.Height || q.Weight(e.Key) == 0 {
 		return false
 	}
-	if e.Verify() != nil {
+	if e.Verify(f.genesisID) != nil {
 		return false
 	}
 	f.mu.Lock()
@@ -346,8 +385,25 @@ func (f *FinalityState) AddEquivocation(e *Equivocation, q *Quorum) bool {
 	if _, known := f.caught[e.Key]; known {
 		return false
 	}
+	f.evictCaughtIfFull()
 	f.caught[e.Key] = e
 	return true
+}
+
+// evictCaughtIfFull drops the lowest-height proof of double signing when f.caught is at MaxCaughtKeys,
+// to make room for a new one. It is called with f.mu held.
+func (f *FinalityState) evictCaughtIfFull() {
+	if len(f.caught) < MaxCaughtKeys {
+		return
+	}
+	var lowKey [32]byte
+	lowH := ^uint64(0)
+	for k, ev := range f.caught {
+		if ev.Height < lowH {
+			lowH, lowKey = ev.Height, k
+		}
+	}
+	delete(f.caught, lowKey)
 }
 
 // Caught returns the proofs of double signing the node knows of.
@@ -428,7 +484,8 @@ func (f *FinalityState) UpdateOn(tipHeight uint64, lookup ChainLookup, quorum Qu
 	sort.Slice(heights, func(i, j int) bool { return heights[i] > heights[j] })
 
 	// 2. the questions to the chain **without our lock** — the lookups take the header chain's
-	//    lock and the caller of CheckReorg holds that same lock. Holding both here would be a cycle.
+	//    lock, and the reorg guard reads our state while holding that same lock. Holding both here
+	//    would be a cycle.
 	type candidate struct {
 		id [32]byte
 		q  *Quorum
@@ -439,13 +496,22 @@ func (f *FinalityState) UpdateOn(tipHeight uint64, lookup ChainLookup, quorum Qu
 		if !ok {
 			continue
 		}
-		if q := quorum(h); q != nil {
-			ours[h] = candidate{id: id, q: q}
+		q := quorum(h)
+		if q == nil {
+			continue
 		}
+		// id and q are two separate reads of the chain. A reorg landing between them could pair the id
+		// of one branch with a quorum built over another's blocks. Re-read the id: if the block at h
+		// moved while the quorum was being computed, skip it this round — the next Update picks it up on
+		// a settled view. (Step 3 re-checks the id against the active branch under the hold, but not q.)
+		if id2, ok := lookup(h); !ok || id2 != id {
+			continue
+		}
+		ours[h] = candidate{id: id, q: q}
 	}
 
 	// 3. the decision under our lock, recomputed (the state may have changed in the meantime). The
-	//    chain's lock, when there is one, is taken first — the order CheckReorg takes them in.
+	//    chain's lock, when there is one, is taken first — the order the reorg guard takes them in.
 	decide := func(active ChainLookup) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
@@ -537,8 +603,12 @@ func (f *FinalityState) Restore(height uint64, id [32]byte) {
 	f.pruneBelow(height)
 }
 
-// CheckReorg verifies that a proposed reorg does not reach below a finalized block.
-// forkHeight is the height of the common ancestor — the reorg changes everything above it.
+// CheckReorg verifies that a proposed reorg does not reach below a finalized block. forkHeight is the
+// height of the common ancestor — the reorg changes everything above it.
+//
+// In production the header chain enforces this itself, inside its own lock, via leavesFinalityLocked
+// (which reads Finalized()); this standalone predicate is kept for the tests that check the invariant
+// directly.
 func (f *FinalityState) CheckReorg(forkHeight uint64) error {
 	f.mu.RLock()
 	defer f.mu.RUnlock()

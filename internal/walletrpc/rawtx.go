@@ -1,6 +1,8 @@
 package walletrpc
 
 import (
+	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
@@ -9,6 +11,7 @@ import (
 	"log"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"powmachina/internal/address"
@@ -362,8 +365,32 @@ func (s *walletCtx) walletPassphrase(a args) (any, error) {
 	return nil, nil
 }
 
+// passCacheKey is a per-process random key for the passphrase cache. The unlock window keeps a hash of
+// the passphrase so a second walletpassphrase (an adapter makes one on every withdrawal) can skip the
+// ~1 s Argon2id. Keying that hash with a secret that never touches disk and differs every run stops a
+// leaked process image from yielding a bare, offline-bruteforceable hash of the password: without the
+// key the cached value is opaque, and the key is gone the moment the process ends.
+var (
+	passCacheKey  [32]byte
+	passCacheOnce sync.Once
+)
+
+// passFingerprint is HMAC-SHA256(passCacheKey, pass).
+func passFingerprint(pass string) [32]byte {
+	passCacheOnce.Do(func() {
+		if _, err := rand.Read(passCacheKey[:]); err != nil {
+			panic("walletrpc: no randomness for the passphrase cache key: " + err.Error())
+		}
+	})
+	mac := hmac.New(sha256.New, passCacheKey[:])
+	mac.Write([]byte(pass))
+	var out [32]byte
+	mac.Sum(out[:0])
+	return out
+}
+
 func (s *walletCtx) checkPass(pass string) bool {
-	h := sha256.Sum256([]byte(pass))
+	h := passFingerprint(pass)
 	s.st.mu.Lock()
 	known, want := s.st.passKnown, s.st.passHash
 	s.st.mu.Unlock()

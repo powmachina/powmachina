@@ -108,10 +108,10 @@ func FuzzAttestationVerify(f *testing.F) {
 		priv := ed25519.NewKeyFromSeed(s)
 		a := Attestation{Height: height, BlockID: id, Signature: sig}
 		copy(a.Key[:], priv.Public().(ed25519.PublicKey))
-		if err := a.Verify(); err == nil {
+		if err := a.Verify([32]byte{}); err == nil {
 			t.Fatalf("a random signature passed verification (key %x, height %d)", a.Key[:4], height)
 		}
-		AttestationMessage(height, id)
+		AttestationMessage([32]byte{}, height, id)
 	})
 }
 

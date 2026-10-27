@@ -209,7 +209,7 @@ func TestAStoppedMinerLosesItsSeat(t *testing.T) {
 func signAll(t *testing.T, f *FinalityState, q *Quorum, height uint64, id [32]byte, keys ...ed25519.PrivateKey) {
 	t.Helper()
 	for _, k := range keys {
-		if _, err := f.Add(Sign(k, height, id), q); err != nil {
+		if _, err := f.Add(Sign(k, [32]byte{}, height, id), q); err != nil {
 			t.Fatalf("key %x at %d: %v", k.Public(), height, err)
 		}
 	}
@@ -224,7 +224,7 @@ func TestFinalityTakesMoreThanTwoThirds(t *testing.T) {
 	ids := map[uint64][32]byte{h: blockID(0xaa)}
 	q := quorumsOf(w)(h)
 
-	f := NewFinalityState()
+	f := NewFinalityState([32]byte{})
 	signAll(t, f, q, h, ids[h], b, c)
 	f.Update(h+FinalityDepth, chainOf(ids), quorumsOf(w))
 	if _, _, ok := f.Finalized(); ok {
@@ -242,7 +242,7 @@ func TestFinalityRespectsDepth(t *testing.T) {
 	a := finalityKey(1)
 	w := window{}.mined(1, 100, a)
 	ids := map[uint64][32]byte{50: blockID(0x50)}
-	f := NewFinalityState()
+	f := NewFinalityState([32]byte{})
 	signAll(t, f, quorumsOf(w)(50), 50, ids[50], a)
 	f.Update(50+FinalityDepth-1, chainOf(ids), quorumsOf(w))
 	if _, _, ok := f.Finalized(); ok {
@@ -260,7 +260,7 @@ func TestQuorumCannotFinalizeForeignBlock(t *testing.T) {
 	a, b := finalityKey(1), finalityKey(2)
 	w := window{}.mined(1, 30, a).mined(31, 60, b)
 	ours := map[uint64][32]byte{55: blockID(0x01)}
-	f := NewFinalityState()
+	f := NewFinalityState([32]byte{})
 	signAll(t, f, quorumsOf(w)(55), 55, blockID(0xEE), a, b)
 	f.Update(200, chainOf(ours), quorumsOf(w))
 	if _, _, ok := f.Finalized(); ok {
@@ -273,18 +273,18 @@ func TestQuorumCannotFinalizeForeignBlock(t *testing.T) {
 func TestKeyWithoutASeatIsTurnedAway(t *testing.T) {
 	a, stranger := finalityKey(1), finalityKey(9)
 	w := window{}.mined(1, 60, a)
-	f := NewFinalityState()
+	f := NewFinalityState([32]byte{})
 	q := quorumsOf(w)(50)
-	if _, err := f.Add(Sign(stranger, 50, blockID(1)), q); !errors.Is(err, ErrUnknownSigner) {
+	if _, err := f.Add(Sign(stranger, [32]byte{}, 50, blockID(1)), q); !errors.Is(err, ErrUnknownSigner) {
 		t.Fatalf("a key without a seat: %v", err)
 	}
-	if _, err := f.Add(Sign(a, 50, blockID(1)), nil); !errors.Is(err, ErrUnknownSigner) {
+	if _, err := f.Add(Sign(a, [32]byte{}, 50, blockID(1)), nil); !errors.Is(err, ErrUnknownSigner) {
 		t.Fatalf("no quorum for the height: %v", err)
 	}
-	if _, err := f.Add(Sign(a, 51, blockID(1)), q); !errors.Is(err, ErrUnknownSigner) {
+	if _, err := f.Add(Sign(a, [32]byte{}, 51, blockID(1)), q); !errors.Is(err, ErrUnknownSigner) {
 		t.Fatalf("the quorum of another height: %v", err)
 	}
-	bad := Sign(a, 50, blockID(1))
+	bad := Sign(a, [32]byte{}, 50, blockID(1))
 	bad.Signature[3] ^= 1
 	if _, err := f.Add(bad, q); !errors.Is(err, ErrBadSignature) {
 		t.Fatalf("a broken signature: %v", err)
@@ -299,13 +299,13 @@ func TestKeyWithoutASeatIsTurnedAway(t *testing.T) {
 func TestACaughtKeyStopsCounting(t *testing.T) {
 	a, b := finalityKey(1), finalityKey(2)
 	w := window{}.mined(1, 40, a).mined(41, 50, b) // a has 80 %
-	f := NewFinalityState()
+	f := NewFinalityState([32]byte{})
 	q := quorumsOf(w)(50)
-	if _, err := f.Add(Sign(a, 50, blockID(0xAA)), q); err != nil {
+	if _, err := f.Add(Sign(a, [32]byte{}, 50, blockID(0xAA)), q); err != nil {
 		t.Fatal(err)
 	}
-	ev, err := f.Add(Sign(a, 50, blockID(0xBB)), q)
-	if ev == nil || !errors.Is(err, ErrSignerConflict) || ev.Verify() != nil {
+	ev, err := f.Add(Sign(a, [32]byte{}, 50, blockID(0xBB)), q)
+	if ev == nil || !errors.Is(err, ErrSignerConflict) || ev.Verify([32]byte{}) != nil {
 		t.Fatalf("the conflict was not recognized: %v, %v", ev, err)
 	}
 	// Its signature at another height counts for nothing now.
@@ -327,8 +327,8 @@ func TestACaughtKeyStopsCounting(t *testing.T) {
 func TestEquivocationFromTheNetworkIsChecked(t *testing.T) {
 	a, b, stranger := finalityKey(1), finalityKey(2), finalityKey(3)
 	q := quorumsOf(window{}.mined(1, 40, a).mined(41, 50, b))(50)
-	good := &Equivocation{Key: pubOf(a), Height: 50, First: Sign(a, 50, blockID(1)), Second: Sign(a, 50, blockID(2))}
-	f := NewFinalityState()
+	good := &Equivocation{Key: pubOf(a), Height: 50, First: Sign(a, [32]byte{}, 50, blockID(1)), Second: Sign(a, [32]byte{}, 50, blockID(2))}
+	f := NewFinalityState([32]byte{})
 	if !f.AddEquivocation(good, q) {
 		t.Fatal("a valid proof was refused")
 	}
@@ -336,21 +336,21 @@ func TestEquivocationFromTheNetworkIsChecked(t *testing.T) {
 		t.Fatal("the same key was caught twice")
 	}
 	for name, e := range map[string]*Equivocation{
-		"two keys":      {Key: pubOf(b), Height: 50, First: Sign(b, 50, blockID(1)), Second: Sign(a, 50, blockID(2))},
-		"two heights":   {Key: pubOf(b), Height: 50, First: Sign(b, 50, blockID(1)), Second: Sign(b, 51, blockID(2))},
-		"one block":     {Key: pubOf(b), Height: 50, First: Sign(b, 50, blockID(1)), Second: Sign(b, 50, blockID(1))},
-		"a forged half": {Key: pubOf(b), Height: 50, First: Sign(b, 50, blockID(1)), Second: Attestation{Height: 50, BlockID: blockID(2), Key: pubOf(b), Signature: make([]byte, 64)}},
-		"no seat":       {Key: pubOf(stranger), Height: 50, First: Sign(stranger, 50, blockID(1)), Second: Sign(stranger, 50, blockID(2))},
+		"two keys":      {Key: pubOf(b), Height: 50, First: Sign(b, [32]byte{}, 50, blockID(1)), Second: Sign(a, [32]byte{}, 50, blockID(2))},
+		"two heights":   {Key: pubOf(b), Height: 50, First: Sign(b, [32]byte{}, 50, blockID(1)), Second: Sign(b, [32]byte{}, 51, blockID(2))},
+		"one block":     {Key: pubOf(b), Height: 50, First: Sign(b, [32]byte{}, 50, blockID(1)), Second: Sign(b, [32]byte{}, 50, blockID(1))},
+		"a forged half": {Key: pubOf(b), Height: 50, First: Sign(b, [32]byte{}, 50, blockID(1)), Second: Attestation{Height: 50, BlockID: blockID(2), Key: pubOf(b), Signature: make([]byte, 64)}},
+		"no seat":       {Key: pubOf(stranger), Height: 50, First: Sign(stranger, [32]byte{}, 50, blockID(1)), Second: Sign(stranger, [32]byte{}, 50, blockID(2))},
 	} {
 		if f.AddEquivocation(e, q) {
 			t.Fatalf("%s: accepted", name)
 		}
 	}
-	other := &Equivocation{Key: pubOf(b), Height: 50, First: Sign(b, 50, blockID(1)), Second: Sign(b, 50, blockID(2))}
+	other := &Equivocation{Key: pubOf(b), Height: 50, First: Sign(b, [32]byte{}, 50, blockID(1)), Second: Sign(b, [32]byte{}, 50, blockID(2))}
 	if f.AddEquivocation(other, nil) {
 		t.Fatal("accepted without a quorum to check the key against")
 	}
-	if f.AddEquivocation(&Equivocation{Key: pubOf(b), Height: 49, First: Sign(b, 49, blockID(1)), Second: Sign(b, 49, blockID(2))}, q) {
+	if f.AddEquivocation(&Equivocation{Key: pubOf(b), Height: 49, First: Sign(b, [32]byte{}, 49, blockID(1)), Second: Sign(b, [32]byte{}, 49, blockID(2))}, q) {
 		t.Fatal("accepted against the quorum of another height")
 	}
 	if len(f.Caught()) != 1 {
@@ -364,9 +364,9 @@ func TestEquivocationFromTheNetworkIsChecked(t *testing.T) {
 func TestAddRejectsDuplicateSoGossipStops(t *testing.T) {
 	a := finalityKey(1)
 	w := window{}.mined(1, 200, a)
-	f := NewFinalityState()
+	f := NewFinalityState([32]byte{})
 	q := quorumsOf(w)(100)
-	att := Sign(a, 100, blockID(3))
+	att := Sign(a, [32]byte{}, 100, blockID(3))
 	if ev, err := f.Add(att, q); err != nil || ev != nil {
 		t.Fatalf("the first attestation should have passed: %v, %v", ev, err)
 	}
@@ -380,7 +380,7 @@ func TestAddRejectsDuplicateSoGossipStops(t *testing.T) {
 		t.Fatalf("the duplicates were counted: %d attestations", n)
 	}
 	// A conflicting one is proof once; its repeats are duplicates, so not even the proof travels in circles.
-	second := Sign(a, 100, blockID(4))
+	second := Sign(a, [32]byte{}, 100, blockID(4))
 	if ev, err := f.Add(second, q); ev == nil || !errors.Is(err, ErrSignerConflict) {
 		t.Fatalf("the conflict: %v, %v", ev, err)
 	}
@@ -395,7 +395,7 @@ func TestFinalityStatePrunesBelowFinalized(t *testing.T) {
 	w := window{}.mined(1, 100, a)
 	const target = 70
 	ids := map[uint64][32]byte{}
-	f := NewFinalityState()
+	f := NewFinalityState([32]byte{})
 	for h := uint64(60); h <= target; h++ {
 		ids[h] = blockID(byte(h))
 		signAll(t, f, quorumsOf(w)(h), h, ids[h], a)
@@ -415,7 +415,7 @@ func TestFinalityStatePrunesBelowFinalized(t *testing.T) {
 		}
 	}
 	// And a late attestation below it is a duplicate, not something new to relay.
-	if _, err := f.Add(Sign(a, 65, ids[65]), quorumsOf(w)(65)); !errors.Is(err, ErrDuplicateAttestation) {
+	if _, err := f.Add(Sign(a, [32]byte{}, 65, ids[65]), quorumsOf(w)(65)); !errors.Is(err, ErrDuplicateAttestation) {
 		t.Fatalf("an attestation below the finalized height: %v", err)
 	}
 }
@@ -432,14 +432,14 @@ func TestFinalityStateConcurrentAdd(t *testing.T) {
 	for h := uint64(40); h <= 70; h++ {
 		ids[h] = blockID(byte(h))
 	}
-	f0 := NewFinalityState()
+	f0 := NewFinalityState([32]byte{})
 	var wg sync.WaitGroup
 	for _, k := range keys {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for h := uint64(40); h <= 70; h++ {
-				att := Sign(k, h, ids[h])
+				att := Sign(k, [32]byte{}, h, ids[h])
 				_, _ = f0.Add(att, quorumsOf(w)(h))
 				_, _ = f0.Add(att, quorumsOf(w)(h))
 				f0.Update(70+FinalityDepth, chainOf(ids), quorumsOf(w))
@@ -466,7 +466,7 @@ func TestReorgGuard(t *testing.T) {
 	a := finalityKey(1)
 	w := window{}.mined(1, 200, a)
 	ids := map[uint64][32]byte{100: blockID(0xaa)}
-	f := NewFinalityState()
+	f := NewFinalityState([32]byte{})
 	signAll(t, f, quorumsOf(w)(100), 100, ids[100], a)
 	f.Update(200, chainOf(ids), quorumsOf(w))
 
@@ -476,14 +476,14 @@ func TestReorgGuard(t *testing.T) {
 	if err := f.CheckReorg(100); err != nil {
 		t.Fatalf("a reorg from the finalized height upwards should pass, got %v", err)
 	}
-	if err := NewFinalityState().CheckReorg(1); err != nil {
+	if err := NewFinalityState([32]byte{}).CheckReorg(1); err != nil {
 		t.Fatalf("without attestations nothing may be blocked, got %v", err)
 	}
 }
 
 // What a node recorded before it stopped comes back, and only moves finality forward.
 func TestRestoreOnlyMovesForward(t *testing.T) {
-	f := NewFinalityState()
+	f := NewFinalityState([32]byte{})
 	f.Restore(100, blockID(1))
 	if h, id, ok := f.Finalized(); !ok || h != 100 || id != blockID(1) {
 		t.Fatalf("restored %d %x %v", h, id[:2], ok)
@@ -509,7 +509,7 @@ func TestInRangeDoesNotWalkTheRange(t *testing.T) {
 		}
 		w.mined(h, h, k)
 	}
-	f := NewFinalityState()
+	f := NewFinalityState([32]byte{})
 	for _, h := range []uint64{47, 45, 46} {
 		signAll(t, f, quorumsOf(w)(h), h, blockID(byte(h)), a, b)
 	}

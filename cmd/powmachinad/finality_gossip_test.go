@@ -57,7 +57,7 @@ func TestAttestationIsForwardedOnlyOnce(t *testing.T) {
 		return len(node.conns) == 2
 	}, "the node did not register both connections")
 
-	att := chain.Sign(node.signer.Priv(), target, id)
+	att := chain.Sign(node.signer.Priv(), node.chain.GenesisID(), target, id)
 	payload, err := p2p.EncodeAttestation(att)
 	if err != nil {
 		t.Fatal(err)

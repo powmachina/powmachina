@@ -99,7 +99,7 @@ func main() {
 			login += "." + *worker
 		}
 		cl := &stratum.Client{URL: *pool, Login: login, Pass: "x", Agent: "powmachina-miner/" + version, Log: logger}
-		cl.Finality = openFinalityKey(*finKey, params.Name, logger)
+		cl.Finality = openFinalityKey(*finKey, params.Name, chain.Genesis(params).ID(), logger)
 		feed = cl
 		mode = "stratum " + *pool
 	} else {
@@ -267,7 +267,7 @@ func nodeHint(err error, params chain.NetParams) string {
 
 // openFinalityKey opens (or makes) the miner's own finality key for stratum. A key that cannot be
 // had is not a reason to stop mining: the miner says so and mines with the server's key.
-func openFinalityKey(spec, network string, logger *log.Logger) *finkey.Signer {
+func openFinalityKey(spec, network string, genesisID [32]byte, logger *log.Logger) *finkey.Signer {
 	path := spec
 	switch spec {
 	case "none", "off", "":
@@ -285,7 +285,7 @@ func openFinalityKey(spec, network string, logger *log.Logger) *finkey.Signer {
 		}
 		path = filepath.Join(dir, "finality.key")
 	}
-	s, created, err := finkey.Load(path, path+".signed")
+	s, created, err := finkey.Load(path, path+".signed", genesisID)
 	if err != nil {
 		logger.Printf("finality: %v — mining with the pool's key", err)
 		return nil

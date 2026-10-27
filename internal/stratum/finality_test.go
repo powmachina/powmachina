@@ -21,7 +21,8 @@ import (
 // A miner without a key mines with the node's.
 func TestMinerWithItsOwnFinalityKey(t *testing.T) {
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
-	signer := finkey.New(priv, "")
+	gid := chain.RegtestGenesis().ID()
+	signer := finkey.New(priv, gid, "")
 	nodeKey := strings.Repeat("11", 32)
 	block := [32]byte{0xab}
 	f := &fakeNode{tip: chain.RegtestGenesis().ID(), nodeKey: nodeKey,
@@ -55,8 +56,8 @@ func TestMinerWithItsOwnFinalityKey(t *testing.T) {
 	f.mu.Lock()
 	a := f.atts[0]
 	f.mu.Unlock()
-	if a.Key != signer.Pub || a.Height != 5 || a.BlockID != block || a.Verify() != nil {
-		t.Fatalf("the attestation: height %d key %x block %x verify %v", a.Height, a.Key[:4], a.BlockID[:4], a.Verify())
+	if a.Key != signer.Pub || a.Height != 5 || a.BlockID != block || a.Verify(gid) != nil {
+		t.Fatalf("the attestation: height %d key %x block %x verify %v", a.Height, a.Key[:4], a.BlockID[:4], a.Verify(gid))
 	}
 
 	stopPlain := run(nil)

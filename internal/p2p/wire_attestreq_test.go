@@ -40,7 +40,7 @@ func TestAttestationsRoundTrip(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		seed := make([]byte, ed25519.SeedSize)
 		seed[0] = byte(i)
-		list = append(list, chain.Sign(ed25519.NewKeyFromSeed(seed), uint64(100+i), [32]byte{byte(i)}))
+		list = append(list, chain.Sign(ed25519.NewKeyFromSeed(seed), [32]byte{}, uint64(100+i), [32]byte{byte(i)}))
 	}
 	raw, err := EncodeAttestations(list)
 	if err != nil {

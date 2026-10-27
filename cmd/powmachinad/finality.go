@@ -27,10 +27,11 @@ const (
 	finalityStateFile  = "finality.json"
 )
 
-// loadFinalitySigner opens the node's key in the datadir, making one the first time.
-func loadFinalitySigner(datadir string) (*finkey.Signer, error) {
+// loadFinalitySigner opens the node's key in the datadir, making one the first time. genesisID binds
+// the signatures to this chain (chain.AttestationMessage).
+func loadFinalitySigner(datadir string, genesisID [32]byte) (*finkey.Signer, error) {
 	keyPath := filepath.Join(datadir, finalityKeyFile)
-	s, created, err := finkey.Load(keyPath, filepath.Join(datadir, finalitySignedFile))
+	s, created, err := finkey.Load(keyPath, filepath.Join(datadir, finalitySignedFile), genesisID)
 	if err != nil {
 		return nil, err
 	}
@@ -129,6 +130,28 @@ func (n *Node) acceptAttestation(att chain.Attestation, from string) error {
 func (n *Node) addAttestation(att chain.Attestation, from string) error {
 	if n.finality == nil {
 		return errors.New("the network does not use finality")
+	}
+	// Cheap gates before the expensive quorum. quorumAt walks the whole FinalityWindow and reads
+	// blocks from disk, and the seat check cannot run first because it needs that quorum. So an
+	// unsolicited attestation must not be able to drive a quorum build for an arbitrary height:
+	// a peer could otherwise spray far-apart heights and make the node burn CPU and disk — thrashing
+	// the quorum cache and the chain lock — at no cost to itself. Here we drop, before any quorum,
+	// every attestation the node would never act on anyway: above our tip, at or below the finalized
+	// height, or so far below the tip that its height can no longer be reached by finality. What is
+	// left is a bounded band near the tip, so the set of heights (and the quorum cache) is bounded.
+	//
+	// The band floor keeps a full FinalityWindow below the pending height (tip − FinalityDepth), so
+	// a legitimate attestation is never dropped — including on regtest, where the depth is larger
+	// than the window.
+	_, tip, _ := n.chain.Tip()
+	if att.Height > tip {
+		return errors.New("the attestation is for a height above our tip")
+	}
+	if fin, _, ok := n.finality.Finalized(); ok && att.Height <= fin {
+		return chain.ErrDuplicateAttestation // finalized heights are never recomputed
+	}
+	if att.Height+n.params.FinalityWindow+chain.FinalityDepth < tip {
+		return errors.New("the attestation is too far below the tip to still matter")
 	}
 	ev, err := n.finality.Add(att, n.quorumAt(att.Height))
 	if ev != nil {

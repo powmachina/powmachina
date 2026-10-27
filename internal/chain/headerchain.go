@@ -741,7 +741,10 @@ type LaneStats struct {
 	WindowFill []int
 	Lanes      []LaneStat
 	// RunLane and RunLength are the lane at the tip and how many of its blocks run in a row.
-	// Consensus allows at most MaxSameLaneRun; a higher value means a bug.
+	// Consensus allows at most MaxSameLaneRun in a row — except during lane-rotation relief, when the
+	// other lane has stalled and the live one may legitimately run longer (asert.go, LaneAllowed). So a
+	// value above MaxSameLaneRun is the normal sign of a lane outage, not by itself a bug; an alert on
+	// it should fire only when blocks are still arriving at a normal pace.
 	RunLane   mh.Lane
 	RunLength int
 }

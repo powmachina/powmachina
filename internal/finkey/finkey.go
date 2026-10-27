@@ -25,6 +25,8 @@ type Signer struct {
 	priv ed25519.PrivateKey
 	// Pub is the public key, the one that goes into the share commitment.
 	Pub [32]byte
+	// genesisID is the chain the signatures are bound to (chain.AttestationMessage).
+	genesisID [32]byte
 	// path is where the last signed height is recorded; empty for a key in memory.
 	path       string
 	lastHeight uint64
@@ -32,9 +34,10 @@ type Signer struct {
 	signed     bool
 }
 
-// New makes a signer of a key; recordPath "" keeps the record in memory only.
-func New(priv ed25519.PrivateKey, recordPath string) *Signer {
-	s := &Signer{priv: priv, path: recordPath}
+// New makes a signer of a key bound to the chain `genesisID` roots; recordPath "" keeps the record in
+// memory only.
+func New(priv ed25519.PrivateKey, genesisID [32]byte, recordPath string) *Signer {
+	s := &Signer{priv: priv, genesisID: genesisID, path: recordPath}
 	copy(s.Pub[:], priv.Public().(ed25519.PublicKey))
 	return s
 }
@@ -44,7 +47,7 @@ func (s *Signer) Priv() ed25519.PrivateKey { return s.priv }
 
 // Load opens the key at keyPath, making one the first time (created reports that), and reads what
 // it signed last from recordPath.
-func Load(keyPath, recordPath string) (s *Signer, created bool, err error) {
+func Load(keyPath, recordPath string, genesisID [32]byte) (s *Signer, created bool, err error) {
 	raw, err := os.ReadFile(keyPath)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
@@ -63,7 +66,7 @@ func Load(keyPath, recordPath string) (s *Signer, created bool, err error) {
 	if err != nil || len(seed) != ed25519.SeedSize {
 		return nil, false, fmt.Errorf("%s is not a finality key (64 hex characters)", keyPath)
 	}
-	s = New(ed25519.NewKeyFromSeed(seed), recordPath)
+	s = New(ed25519.NewKeyFromSeed(seed), genesisID, recordPath)
 
 	// What it signed last. Without this a restart after a deep reorg could sign a second block at
 	// a height it already signed — the one thing a key must never do.
@@ -110,7 +113,7 @@ func (s *Signer) Sign(height uint64, id [32]byte) (chain.Attestation, error) {
 		}
 		s.lastHeight, s.lastID, s.signed = height, id, true
 	}
-	return chain.Sign(s.priv, height, id), nil
+	return chain.Sign(s.priv, s.genesisID, height, id), nil
 }
 
 // WriteFileSync writes a file whole or not at all: a temporary file, fsync, rename.

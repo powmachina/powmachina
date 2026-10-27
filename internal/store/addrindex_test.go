@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"powmachina/internal/chain"
+
+	"github.com/cockroachdb/pebble/v2"
 )
 
 // spendChain builds a chain in which the coinbase of block 0 is spent in block 1:
@@ -271,6 +273,132 @@ func TestReindexAddrsMatchesIncremental(t *testing.T) {
 		if gotHist[i] != wantHist[i] {
 			t.Fatalf("movement %d: %+v vs %+v", i, gotHist[i], wantHist[i])
 		}
+	}
+}
+
+// ReindexAddrs must be idempotent: the summaries and the rich list are additive read-modify-write, so
+// a reindex that runs over summaries a previous run already wrote (a crash after building them but
+// before keyAddrIndexed was set leaves exactly that) must not add every delta a second time. The
+// reindex clears its key spaces up front, so a second run over surviving state reproduces the first,
+// not double it.
+func TestReindexAddrsIsIdempotentAfterCrash(t *testing.T) {
+	blocks, keyA, keyB := spendChain(t)
+	skA, skB := ScriptKeyFor(0, keyA[:]), ScriptKeyFor(0, keyB[:])
+
+	s := openIndexed(t)
+	applyAll(t, s, blocks)
+	wantA, _ := s.AddrSummary(skA)
+	wantB, _ := s.AddrSummary(skB)
+	wantHist, _ := s.AddrHistory(skA, 0, 50)
+
+	// Simulate a reindex that got as far as writing the summaries and then crashed before marking
+	// itself ready: the readiness mark is cleared, the summaries stay. On the next start AddrIndexReady
+	// is false, so the node reindexes again — over the surviving summaries.
+	if err := s.db.Delete(keyAddrIndexed, pebble.Sync); err != nil {
+		t.Fatal(err)
+	}
+	if s.AddrIndexReady() {
+		t.Fatal("the readiness mark should be gone")
+	}
+	if err := s.ReindexAddrs(nil); err != nil {
+		t.Fatal(err)
+	}
+	if !s.AddrIndexReady() {
+		t.Fatal("the readiness mark is missing after the reindex")
+	}
+
+	gotA, _ := s.AddrSummary(skA)
+	gotB, _ := s.AddrSummary(skB)
+	if gotA.Received != wantA.Received || gotA.Sent != wantA.Sent || gotA.TxCount != wantA.TxCount {
+		t.Fatalf("A doubled across a re-run: got %+v, want %+v", gotA, wantA)
+	}
+	if gotB.Received != wantB.Received || gotB.Sent != wantB.Sent || gotB.TxCount != wantB.TxCount {
+		t.Fatalf("B doubled across a re-run: got %+v, want %+v", gotB, wantB)
+	}
+	gotHist, _ := s.AddrHistory(skA, 0, 50)
+	if len(gotHist) != len(wantHist) {
+		t.Fatalf("the history has %d movements after a re-run, want %d", len(gotHist), len(wantHist))
+	}
+	for i := range gotHist {
+		if gotHist[i] != wantHist[i] {
+			t.Fatalf("movement %d: %+v vs %+v", i, gotHist[i], wantHist[i])
+		}
+	}
+}
+
+// Paging the history by height must not drop movements when one height holds more than a page's
+// worth. The explorer pages by `before = <lowest height on the page>`, so a page that stopped in the
+// middle of a height would leave the rest of that height unreachable (the next page starts strictly
+// below it). AddrHistory takes the whole of its lowest height even past the limit; this checks that
+// walking the pages returns every movement exactly once.
+func TestAddrHistoryDoesNotSplitAHeight(t *testing.T) {
+	var keyA, keyB [32]byte
+	keyA[0], keyB[0] = 0xAA, 0xBB
+
+	cb := &chain.Tx{Version: 1, Inputs: []chain.TxIn{{PrevIndex: chain.CoinbaseIndex}},
+		Outputs: []chain.TxOut{{Value: 1_000_000_000, Script: keyA[:]}}}
+	genesis := &chain.Block{Header: &chain.Header{Version: 1, Bits: chain.RegtestTargetBits,
+		Height: 0, Time: 1_700_000_000, Lane: 1}, Txs: []*chain.Tx{cb}}
+	genesis.Seal()
+
+	cb2 := &chain.Tx{Version: 1, Inputs: []chain.TxIn{{PrevTxID: [32]byte{1}, PrevIndex: chain.CoinbaseIndex}},
+		Outputs: []chain.TxOut{{Value: 500_000_000, Script: keyB[:]}}}
+	// A spends its coinbase into eight outputs back to itself: at height 1 it then has nine movements
+	// (one spent input, eight received outputs), well over the page limit below. Sum 990 M, 10 M fee.
+	outs := make([]chain.TxOut, 8)
+	for i := range outs {
+		outs[i] = chain.TxOut{Value: 120_000_000, Script: keyA[:]}
+	}
+	outs[7].Value = 150_000_000
+	cbID := cb.TxID()
+	spend := &chain.Tx{Version: 1, Inputs: []chain.TxIn{{PrevTxID: cbID, PrevIndex: 0}}, Outputs: outs}
+	second := &chain.Block{Header: &chain.Header{Version: 1, PrevBlock: genesis.Header.ID(),
+		Bits: chain.RegtestTargetBits, Height: 1, Time: 1_700_000_120, Lane: 1}, Txs: []*chain.Tx{cb2, spend}}
+	second.Seal()
+
+	s := openIndexed(t)
+	applyAll(t, s, []*chain.Block{genesis, second})
+	skA := ScriptKeyFor(0, keyA[:])
+
+	// One received at height 0, one spent and eight received at height 1 = ten movements in all.
+	all, err := s.AddrHistory(skA, 0, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 10 {
+		t.Fatalf("expected 10 movements, got %d", len(all))
+	}
+
+	type mk struct {
+		tx   [32]byte
+		n    uint32
+		recv bool
+	}
+	seen := map[mk]bool{}
+	before := uint64(0)
+	for {
+		page, err := s.AddrHistory(skA, before, 3)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page) == 0 {
+			t.Fatal("a page came back empty before the history was exhausted")
+		}
+		for _, e := range page {
+			k := mk{e.TxID, e.N, e.Received}
+			if seen[k] {
+				t.Fatalf("a movement was returned twice across pages: %+v", k)
+			}
+			seen[k] = true
+		}
+		low := page[len(page)-1].Height
+		if low == 0 {
+			break // height 0 is the "from the tip" sentinel; nothing pages below it
+		}
+		before = low
+	}
+	if len(seen) != 10 {
+		t.Fatalf("paging lost movements: saw %d of 10", len(seen))
 	}
 }
 

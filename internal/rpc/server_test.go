@@ -210,6 +210,8 @@ func call(t *testing.T, s *Server, token, method string, params any) (map[string
 	}
 	raw, _ := json.Marshal(body)
 	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(raw))
+	req.Host = "127.0.0.1"
+	req.Header.Set("Content-Type", "application/json")
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
@@ -325,6 +327,8 @@ func TestSendRawTransaction(t *testing.T) {
 	body := map[string]any{"method": "sendrawtransaction", "params": map[string]string{"hex": raw}, "id": 1}
 	data, _ := json.Marshal(body)
 	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(data))
+	req.Host = "127.0.0.1"
+	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	s.ServeHTTP(w, req)
 
@@ -382,6 +386,50 @@ func TestTokenRequired(t *testing.T) {
 	}
 }
 
+// In tokenless mode (the loopback default) the node must refuse the two shapes a browser can send
+// cross-origin: a request whose Host is a registered domain (DNS rebinding) and one without a JSON
+// content type (a simple cross-origin POST). With a token set, neither check applies.
+func TestTokenlessRejectsCrossOrigin(t *testing.T) {
+	s := NewServer(&fakeBackend{height: 1}, "")
+	body := []byte(`{"method":"getinfo","id":1}`)
+
+	// A rebinding Host.
+	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(body))
+	req.Host = "evil.example.com"
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("a hostname Host should give 403, it gave %d", w.Code)
+	}
+
+	// A non-JSON content type from a loopback host.
+	req = httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(body))
+	req.Host = "127.0.0.1"
+	req.Header.Set("Content-Type", "text/plain")
+	w = httptest.NewRecorder()
+	s.ServeHTTP(w, req)
+	if w.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("a text/plain body should give 415, it gave %d", w.Code)
+	}
+
+	// The same request done right is served.
+	if _, rerr := call(t, s, "", "getinfo", nil); rerr != nil {
+		t.Fatalf("a well-formed loopback request should pass: %v", rerr.Message)
+	}
+
+	// With a token set, a hostname Host carrying the token is fine (proxied setups).
+	st := NewServer(&fakeBackend{height: 1}, "secret")
+	req = httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(body))
+	req.Host = "node.internal.example"
+	req.Header.Set("Authorization", "Bearer secret")
+	w = httptest.NewRecorder()
+	st.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("with a token a hostname Host should be served, it gave %d", w.Code)
+	}
+}
+
 func TestRequestLimitsAndMethods(t *testing.T) {
 	s := NewServer(&fakeBackend{height: 1}, "")
 
@@ -395,7 +443,10 @@ func TestRequestLimitsAndMethods(t *testing.T) {
 	// A body that is too large.
 	big := bytes.Repeat([]byte("a"), MaxRequestBytes+10)
 	w = httptest.NewRecorder()
-	s.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(big)))
+	bigReq := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(big))
+	bigReq.Host = "127.0.0.1"
+	bigReq.Header.Set("Content-Type", "application/json")
+	s.ServeHTTP(w, bigReq)
 	if w.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("an oversized body should give 413, it gave %d", w.Code)
 	}
@@ -587,6 +638,8 @@ func callJSON(t *testing.T, s *Server, method string, params any, out any) {
 	}
 	raw, _ := json.Marshal(body)
 	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(raw))
+	req.Host = "127.0.0.1"
+	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer secret")
 	w := httptest.NewRecorder()
 	s.ServeHTTP(w, req)

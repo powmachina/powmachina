@@ -45,6 +45,10 @@ func ScriptKeyFor(version uint8, script []byte) ScriptKey {
 	return ScriptKey(mh.TaggedHash(domainAddrIndex, buf))
 }
 
+// addrIndexSpaces are the key spaces the address index owns: the per-movement rows, the per-address
+// summaries, and the rich list. A rebuild clears all three before it starts (see ReindexAddrs).
+var addrIndexSpaces = []byte{prefixAddr, prefixAddrSum, prefixRich}
+
 // keyAddrEntry: <prefix><scriptKey:32><height:8 BE><txid:32><dir:1><n:4>
 //
 // A prefix scan by scriptKey returns the history ordered by height — exactly the order an explorer
@@ -158,10 +162,16 @@ func (s *Store) AddrSummary(sk ScriptKey) (AddrSummary, error) {
 }
 
 // AddrHistory returns an address's movements from the newest. `before` is the height to go below
-// (0 = from the tip); `limit` is the cap on the number of entries.
+// (0 = from the tip); `limit` is the target number of entries.
 //
 // It is keyset paging through a prefix scan, not an offset — with an address with a long history an
 // offset gets linearly more expensive with every further page.
+//
+// A page never splits a height. The cursor the caller pages by is a bare height (`before`), so once
+// the limit is reached the scan keeps taking the rest of the current height's movements before it
+// stops. Otherwise an address with more than `limit` movements in one block would lose the ones left
+// at the page's lowest height: the next page starts strictly below that height and never returns them.
+// A page can therefore be a little longer than `limit`, bounded by how many movements one block holds.
 func (s *Store) AddrHistory(sk ScriptKey, before uint64, limit int) ([]AddrEntry, error) {
 	if !s.indexAddr {
 		return nil, ErrNoAddrIndex
@@ -183,7 +193,7 @@ func (s *Store) AddrHistory(sk ScriptKey, before uint64, limit int) ([]AddrEntry
 	defer it.Close()
 
 	out := make([]AddrEntry, 0, limit)
-	for ok := it.Last(); ok && len(out) < limit; ok = it.Prev() {
+	for ok := it.Last(); ok; ok = it.Prev() {
 		k := it.Key()
 		if len(k) != 1+32+8+32+1+4 {
 			continue
@@ -192,8 +202,15 @@ func (s *Store) AddrHistory(sk ScriptKey, before uint64, limit int) ([]AddrEntry
 		if len(v) != 8 {
 			continue
 		}
+		h := binary.BigEndian.Uint64(k[33:41])
+		// Stop only on a height boundary: once the limit is reached, take the rest of this height's
+		// movements before breaking, so the next page (which starts strictly below this height) does
+		// not skip any.
+		if len(out) >= limit && h != out[len(out)-1].Height {
+			break
+		}
 		var e AddrEntry
-		e.Height = binary.BigEndian.Uint64(k[33:41])
+		e.Height = h
 		copy(e.TxID[:], k[41:73])
 		e.Received = k[73] == dirReceived
 		e.N = binary.BigEndian.Uint32(k[74:78])
@@ -374,6 +391,24 @@ func (s *Store) ReindexAddrs(progress func(height, tip uint64)) error {
 	if err != nil {
 		return err
 	}
+	// Clear the address spaces before rebuilding, so the reindex is idempotent. The summaries and the
+	// rich list are additive read-modify-write, not keyed overwrites; keyAddrIndexed is only set at the
+	// very end. Without this clear a crash mid-reindex would, on the next start (AddrIndexReady still
+	// false), run the whole reindex again over the surviving partial summaries and add every delta a
+	// second time — silently inflating balances and the rich list. A durable clear up front means a
+	// restart re-clears (DeleteRange is idempotent) and rebuilds from a clean slate.
+	clear := s.db.NewBatch()
+	for _, space := range addrIndexSpaces {
+		if err := clear.DeleteRange([]byte{space}, []byte{space + 1}, nil); err != nil {
+			clear.Close()
+			return fmt.Errorf("store: address reindex: %w", err)
+		}
+	}
+	if err := clear.Commit(pebble.Sync); err != nil {
+		clear.Close()
+		return fmt.Errorf("store: address reindex: %w", err)
+	}
+	clear.Close()
 	// It commits after EVERY block, not in batches.
 	//
 	// `applyAddrDeltas` reads the current summary from the database, not from the open batch. If

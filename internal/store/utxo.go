@@ -106,13 +106,13 @@ func decodeUndo(b []byte) (*chain.BlockUndo, error) {
 	r := bytes.NewReader(b)
 	readU32 := func() (uint32, error) {
 		var n [4]byte
-		if _, err := r.Read(n[:]); err != nil {
+		if _, err := io.ReadFull(r, n[:]); err != nil {
 			return 0, err
 		}
 		return binary.LittleEndian.Uint32(n[:]), nil
 	}
 	var num [8]byte
-	if _, err := r.Read(num[:]); err != nil {
+	if _, err := io.ReadFull(r, num[:]); err != nil {
 		return nil, fmt.Errorf("store: corrupted undo data: %w", err)
 	}
 	u := &chain.BlockUndo{Height: binary.LittleEndian.Uint64(num[:])}
@@ -123,7 +123,7 @@ func decodeUndo(b []byte) (*chain.BlockUndo, error) {
 	}
 	for i := uint32(0); i < n; i++ {
 		var e chain.UndoEntry
-		if _, err := r.Read(e.Outpoint.TxID[:]); err != nil {
+		if _, err := io.ReadFull(r, e.Outpoint.TxID[:]); err != nil {
 			return nil, fmt.Errorf("store: corrupted undo data: %w", err)
 		}
 		if e.Outpoint.Index, err = readU32(); err != nil {
@@ -134,7 +134,7 @@ func decodeUndo(b []byte) (*chain.BlockUndo, error) {
 			return nil, fmt.Errorf("store: corrupted undo data: %w", err)
 		}
 		cb := make([]byte, cl)
-		if _, err := r.Read(cb); err != nil {
+		if _, err := io.ReadFull(r, cb); err != nil {
 			return nil, fmt.Errorf("store: corrupted undo data: %w", err)
 		}
 		if e.Coin, err = decodeCoin(cb); err != nil {
@@ -149,7 +149,7 @@ func decodeUndo(b []byte) (*chain.BlockUndo, error) {
 	}
 	for i := uint32(0); i < n; i++ {
 		var op chain.Outpoint
-		if _, err := r.Read(op.TxID[:]); err != nil {
+		if _, err := io.ReadFull(r, op.TxID[:]); err != nil {
 			return nil, fmt.Errorf("store: corrupted undo data: %w", err)
 		}
 		if op.Index, err = readU32(); err != nil {
@@ -158,11 +158,11 @@ func decodeUndo(b []byte) (*chain.BlockUndo, error) {
 		u.Created = append(u.Created, op)
 	}
 
-	if _, err := r.Read(num[:]); err != nil {
+	if _, err := io.ReadFull(r, num[:]); err != nil {
 		return nil, fmt.Errorf("store: corrupted undo data: %w", err)
 	}
 	u.Pot = int64(binary.LittleEndian.Uint64(num[:]))
-	if _, err := r.Read(u.CreditsRoot[:]); err != nil {
+	if _, err := io.ReadFull(r, u.CreditsRoot[:]); err != nil {
 		return nil, fmt.Errorf("store: corrupted undo data: %w", err)
 	}
 	if n, err = readU32(); err != nil {
@@ -173,7 +173,7 @@ func decodeUndo(b []byte) (*chain.BlockUndo, error) {
 	}
 	for i := uint32(0); i < n; i++ {
 		var p [32]byte
-		if _, err := r.Read(p[:]); err != nil {
+		if _, err := io.ReadFull(r, p[:]); err != nil {
 			return nil, fmt.Errorf("store: corrupted undo data: %w", err)
 		}
 		flag, err := r.ReadByte()
@@ -236,7 +236,12 @@ type pebbleBatch struct {
 func (p *pebbleBatch) Get(op chain.Outpoint) (chain.Coin, bool) {
 	v, closer, err := p.b.Get(keyCoin(op.TxID, op.Index))
 	if err != nil {
-		return chain.Coin{}, false // both ErrNotFound and a real error: the coin is not usable
+		if !errors.Is(err, pebble.ErrNotFound) {
+			// A real read error, not a missing coin: record it so the caller aborts the apply instead
+			// of mistaking a transient disk fault for a spent/absent output and rejecting a valid block.
+			p.err = err
+		}
+		return chain.Coin{}, false
 	}
 	c, derr := decodeCoin(v)
 	closer.Close()
@@ -280,11 +285,14 @@ func (s *Store) ApplyBlockDirect(b *chain.Block) (*chain.BlockUndo, error) {
 	pb := &pebbleBatch{b: batch}
 
 	undo, err := chain.ApplyBlockTo(b, pb)
-	if err != nil {
-		return nil, err // the batch is discarded, nothing on disk changed
-	}
+	// A batch-level read/write fault takes precedence: without this a transient read error during Get
+	// surfaces as the derived ErrCoinMissing instead of the disk fault it really is. Either way the
+	// batch is discarded and nothing on disk changed.
 	if pb.err != nil {
 		return nil, fmt.Errorf("store: %w", pb.err)
+	}
+	if err != nil {
+		return nil, err
 	}
 	if err := s.finishApply(batch, b, id, height, undo); err != nil {
 		return nil, err
@@ -439,6 +447,46 @@ func (s *Store) RevertTip() error {
 		}
 	}
 	return batch.Commit(pebble.Sync)
+}
+
+// ReconcileUTXOToIndex rolls the UTXO applied tip back onto the active branch described by the
+// height index, and is meant to run once on open, before Restore.
+//
+// A reorg is two durable steps: SetActiveBranch rewrites the height index (and the header tip) to
+// the new branch, then RevertTip rolls the UTXO set back to the fork so ApplyStored can roll it
+// forward along the new branch. A crash between those steps leaves the UTXO tip on a block that is
+// no longer on the active branch — possibly at a height the index no longer covers. Without repair
+// the next open would either fail in Restore (the index above the new, shorter header tip is gone)
+// or in ApplyStored ("the block does not build on the tip"), and the datadir would look corrupt
+// though the chain is whole on disk. At runtime ApplyReadyBodies repairs this before every apply;
+// this is the same repair for the startup path, which goes straight from Restore to ApplyStored.
+//
+// RevertTip walks the applied branch by block id (never through the height index), so it unwinds
+// correctly even where the index no longer lists those blocks. On a datadir that did not crash
+// mid-reorg this returns immediately.
+func (s *Store) ReconcileUTXOToIndex() error {
+	for {
+		tip, err := s.Tip()
+		if errors.Is(err, ErrNotFound) {
+			return nil // fresh storage: nothing is applied yet
+		}
+		if err != nil {
+			return err
+		}
+		id, err := s.BlockIDAt(tip.Height)
+		if err == nil && id == tip.ID {
+			return nil // the UTXO tip is on the active branch
+		}
+		if err != nil && !errors.Is(err, ErrNotFound) {
+			return err // ErrNotFound means the tip is above the header tip — roll it back
+		}
+		if tip.Height == 0 {
+			return fmt.Errorf("store: the UTXO tip is at height 0 and does not match the genesis — a corrupted datadir")
+		}
+		if err := s.RevertTip(); err != nil {
+			return fmt.Errorf("store: reconciling the UTXO tip to the active branch: %w", err)
+		}
+	}
 }
 
 // coinFromBlock finds the output an outpoint points at. The undo data carries only outpoints, not

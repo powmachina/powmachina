@@ -28,6 +28,8 @@ func rpcCall(t *testing.T, srv http.Handler, method string, params any) (json.Ra
 		t.Fatal(err)
 	}
 	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(body))
+	req.Host = "127.0.0.1"
+	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
 	var out struct {
@@ -103,12 +105,12 @@ func TestFinalityIgnoresForeignBlock(t *testing.T) {
 		t.Fatal(err)
 	}
 	target, id := pendingOf(t, node)
-	_ = node.acceptAttestation(chain.Sign(node.signer.Priv(), target, [32]byte{0xff}), "")
+	_ = node.acceptAttestation(chain.Sign(node.signer.Priv(), node.chain.GenesisID(), target, [32]byte{0xff}), "")
 	if _, _, ok := node.finality.Finalized(); ok {
 		t.Fatal("a block the node does not have was finalized")
 	}
 	// Its own block, signed by the same key... is a second block at that height: the key is caught.
-	_ = node.acceptAttestation(chain.Sign(node.signer.Priv(), target, id), "")
+	_ = node.acceptAttestation(chain.Sign(node.signer.Priv(), node.chain.GenesisID(), target, id), "")
 	if _, _, ok := node.finality.Finalized(); ok {
 		t.Fatal("a key caught signing twice finalized")
 	}
@@ -129,7 +131,7 @@ func TestAKeyWithoutASeatIsNotHeard(t *testing.T) {
 	}
 	target, id := pendingOf(t, node)
 	_, stranger, _ := ed25519.GenerateKey(nil)
-	_ = node.acceptAttestation(chain.Sign(stranger, target, id), "")
+	_ = node.acceptAttestation(chain.Sign(stranger, node.chain.GenesisID(), target, id), "")
 	if _, _, ok := node.finality.Finalized(); ok {
 		t.Fatal("a key without a seat finalized")
 	}
@@ -154,10 +156,10 @@ func TestFinalitySurvivesARestart(t *testing.T) {
 	}
 	// A proof has to be of a key with a seat: the node's own, signing twice by hand.
 	priv := node.signer.Priv()
-	ev := &chain.Equivocation{Height: final, First: chain.Sign(priv, final, [32]byte{1}), Second: chain.Sign(priv, final, [32]byte{2})}
+	ev := &chain.Equivocation{Height: final, First: chain.Sign(priv, node.chain.GenesisID(), final, [32]byte{1}), Second: chain.Sign(priv, node.chain.GenesisID(), final, [32]byte{2})}
 	ev.Key = ev.First.Key
 	_, stranger, _ := ed25519.GenerateKey(nil)
-	junk := &chain.Equivocation{Height: final, First: chain.Sign(stranger, final, [32]byte{1}), Second: chain.Sign(stranger, final, [32]byte{2})}
+	junk := &chain.Equivocation{Height: final, First: chain.Sign(stranger, node.chain.GenesisID(), final, [32]byte{1}), Second: chain.Sign(stranger, node.chain.GenesisID(), final, [32]byte{2})}
 	junk.Key = junk.First.Key
 	node.acceptEquivocation(junk, "")
 	if len(node.finality.Caught()) != 0 {
@@ -271,7 +273,7 @@ func TestAttestationIsRelayed(t *testing.T) {
 		return len(node.conns) == 2
 	}, "the node did not register both connections")
 
-	att := chain.Sign(node.signer.Priv(), target, id)
+	att := chain.Sign(node.signer.Priv(), node.chain.GenesisID(), target, id)
 	payload, err := p2p.EncodeAttestation(att)
 	if err != nil {
 		t.Fatal(err)
@@ -325,7 +327,7 @@ func TestStratumMinerSignsThroughTheNode(t *testing.T) {
 		t.Fatalf("due: height %d ok %v, expected %d", h, ok, target)
 	}
 	// A signature of the wrong block is refused.
-	if err := node.SubmitAttestation(chain.Sign(node.signer.Priv(), target, [32]byte{0xee})); err == nil {
+	if err := node.SubmitAttestation(chain.Sign(node.signer.Priv(), node.chain.GenesisID(), target, [32]byte{0xee})); err == nil {
 		t.Fatal("a signature of a block the node does not have was taken")
 	}
 	fresh := quietNode(t)
@@ -333,14 +335,14 @@ func TestStratumMinerSignsThroughTheNode(t *testing.T) {
 		t.Fatal(err)
 	}
 	ft, fid := pendingOf(t, fresh)
-	if err := fresh.SubmitAttestation(chain.Sign(fresh.signer.Priv(), ft, fid)); err != nil {
+	if err := fresh.SubmitAttestation(chain.Sign(fresh.signer.Priv(), fresh.chain.GenesisID(), ft, fid)); err != nil {
 		t.Fatalf("the miner's signature: %v", err)
 	}
 	if got, _, ok := fresh.finality.Finalized(); !ok || got != ft {
 		t.Fatalf("finality %d (%v), expected %d", got, ok, ft)
 	}
 	// The same signature again is not the miner's mistake.
-	if err := fresh.SubmitAttestation(chain.Sign(fresh.signer.Priv(), ft, fid)); err != nil {
+	if err := fresh.SubmitAttestation(chain.Sign(fresh.signer.Priv(), fresh.chain.GenesisID(), ft, fid)); err != nil {
 		t.Fatalf("the same signature again: %v", err)
 	}
 }

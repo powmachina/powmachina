@@ -40,7 +40,7 @@ func finalityChain(t *testing.T, f *FinalityState, n int) (*HeaderChain, []*Head
 func TestFinalityDoesNotLandOffTheActiveBranch(t *testing.T) {
 	a := finalityKey(1)
 	w := window{}.mined(1, 400, a)
-	f := NewFinalityState()
+	f := NewFinalityState([32]byte{})
 	hc, hs := finalityChain(t, f, 150)
 	other := branchHeaders(hs[40], 120, 7) // heavier: 160 blocks against 150
 	const target = 60
@@ -72,7 +72,7 @@ func TestFinalityDoesNotLandOffTheActiveBranch(t *testing.T) {
 func TestAParkedFinalizedBlockComesBack(t *testing.T) {
 	a := finalityKey(1)
 	w := window{}.mined(1, 400, a)
-	f := NewFinalityState()
+	f := NewFinalityState([32]byte{})
 	hc, hs := finalityChain(t, f, 200)
 	const target = 100
 	signAll(t, f, quorumsOf(w)(target), target, hs[target].ID(), a)

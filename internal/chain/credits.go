@@ -306,7 +306,14 @@ func mergePayouts(height uint64, r *creditReader, ready []QueueEntry, readyAll b
 	var plan payoutPlan
 	budget := CoinbaseStorageMassReserve
 	if dev := DevFee(height); dev > 0 {
-		budget -= StorageMassC / uint64(dev)
+		// Saturate rather than wrap: with today's parameters the dev fee in the fee era keeps this
+		// subtrahend tiny, but a future parameter change that let it exceed the reserve would, on a
+		// uint64, wrap to a near-MaxUint64 budget and turn mass-limited payouts into count-limited ones.
+		if sub := StorageMassC / uint64(dev); sub < budget {
+			budget -= sub
+		} else {
+			budget = 0
+		}
 	}
 	i, j := 0, 0
 	for len(plan.payouts) < MaxPayoutsPerBlock {

@@ -189,7 +189,7 @@ func OpenNodeWith(params chain.NetParams, genesis *chain.Header, profile mh.DagP
 	n := newNode(params, genesis, profile, st)
 	n.datadir = datadir
 	if n.finality != nil {
-		signer, err := loadFinalitySigner(datadir)
+		signer, err := loadFinalitySigner(datadir, n.chain.GenesisID())
 		if err != nil {
 			st.Close()
 			return nil, 0, err
@@ -217,6 +217,15 @@ func OpenNodeWith(params chain.NetParams, genesis *chain.Header, profile mh.DagP
 	}
 	if len(bad) > 0 {
 		log.Printf("invalid branches in the datadir: %d", len(bad))
+	}
+
+	// A crash between the two durable steps of a reorg (rewriting the height index, then rolling
+	// the UTXO set back to the fork) leaves the UTXO tip off the active branch. Restore and
+	// ApplyStored both assume it is on the branch, so bring it back first — otherwise an otherwise
+	// whole datadir would refuse to open.
+	if err := st.ReconcileUTXOToIndex(); err != nil {
+		st.Close()
+		return nil, 0, fmt.Errorf("reconciling the UTXO set with the active branch failed: %w", err)
 	}
 
 	height, err := st.Restore(n.chain)
@@ -309,7 +318,7 @@ func newNode(params chain.NetParams, genesis *chain.Header, profile mh.DagProfil
 	// plain PoW (the finality spec).
 	var finality *chain.FinalityState
 	if params.FinalityWindow > 0 {
-		finality = chain.NewFinalityState()
+		finality = chain.NewFinalityState(genesis.ID())
 	}
 	n := &Node{
 		params:   params,
@@ -344,7 +353,7 @@ func newNode(params chain.NetParams, genesis *chain.Header, profile mh.DagProfil
 		if err != nil {
 			panic(err)
 		}
-		n.signer = finkey.New(priv, "")
+		n.signer = finkey.New(priv, genesis.ID(), "")
 	}
 
 	return n

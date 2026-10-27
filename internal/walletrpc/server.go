@@ -97,8 +97,9 @@ type walletState struct {
 	sendMu sync.Mutex
 	mu     sync.Mutex
 	until  time.Time
-	// passHash: SHA-256 of the password after the first successful Argon2id check — further
-	// walletpassphrase calls (an adapter makes one on every withdrawal) therefore do not cost a second.
+	// passHash: a per-process keyed hash (passFingerprint) of the password after the first successful
+	// Argon2id check — further walletpassphrase calls (an adapter makes one on every withdrawal) do not
+	// cost a second. Keyed, not a bare SHA-256, so a memory leak does not expose a brute-forceable hash.
 	passHash  [32]byte
 	passKnown bool
 	// The limit on wrong passwords (tryPassword): how many in a row, and until when none is looked at.

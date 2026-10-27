@@ -196,6 +196,10 @@ func (w *Wallet) initKeys(entropy []byte) error {
 		return err
 	}
 	w.keys, err = newKeychain(seed)
+	// The seed has served its purpose (the keychain holds the derived keys now); wipe this copy.
+	for i := range seed {
+		seed[i] = 0
+	}
 	if err != nil {
 		return err
 	}
@@ -226,6 +230,14 @@ func Open(path, password string, params chain.NetParams) (*Wallet, error) {
 }
 
 func openLocked(path, password string, params chain.NetParams, lk *fileLock) (*Wallet, error) {
+	// Check the size before reading the whole file into memory: a real wallet is kilobytes, and the
+	// sealed payload is capped at maxSealed, so a multi-gigabyte file is not one of ours and must not be
+	// slurped in whole just to be rejected.
+	if fi, err := os.Stat(path); err != nil {
+		return nil, err
+	} else if fi.Size() > maxFileBytes {
+		return nil, ErrNotWallet
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -261,8 +273,15 @@ func (w *Wallet) Close() error {
 	err := w.saveLocked()
 	w.closed = true
 	w.lock.unlock()
+	// Best-effort wipe of the secrets this package owns (see keychain.wipe for the limits).
 	for i := range w.key {
 		w.key[i] = 0
+	}
+	for i := range w.entropy {
+		w.entropy[i] = 0
+	}
+	if w.keys != nil {
+		w.keys.wipe()
 	}
 	return err
 }

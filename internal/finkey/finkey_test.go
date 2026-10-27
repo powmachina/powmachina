@@ -10,7 +10,7 @@ import (
 
 func load(t *testing.T, dir string) *Signer {
 	t.Helper()
-	s, _, err := Load(filepath.Join(dir, "finality.key"), filepath.Join(dir, "finality.signed"))
+	s, _, err := Load(filepath.Join(dir, "finality.key"), filepath.Join(dir, "finality.signed"), [32]byte{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -547,7 +547,7 @@ func (c *sconn) attestation(raw json.RawMessage) *Error {
 	}
 	a := chain.Attestation{Height: p.Height, Key: *key, Signature: sig}
 	copy(a.BlockID[:], id)
-	if err := a.Verify(); err != nil {
+	if err := a.Verify(chain.Genesis(c.s.b.Params()).ID()); err != nil {
 		return c.badAttestation("the signature does not verify")
 	}
 	if err := c.s.b.SubmitAttestation(a); err != nil {
