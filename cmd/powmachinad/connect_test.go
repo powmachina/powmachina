@@ -433,3 +433,79 @@ func TestSelfAddressIsLearnedAndDropped(t *testing.T) {
 		t.Fatalf("our own address came back into the addrman (%d)", newCount)
 	}
 }
+
+// A ping is answered while the peer's earlier message is still being handled. Verifying a batch
+// of headers takes minutes on a slow machine; when the reading waited for it, neither side heard
+// the other's ping and both hung up, so a new node never got past its first batch.
+func TestPingIsAnsweredWhileAMessageIsHandled(t *testing.T) {
+	server, addr, cleanup := listeningNode(t)
+	defer cleanup()
+
+	conn, err := p2p.Dial(addr.String(), chain.RegTest.Magic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	ver := &p2p.VersionMsg{Protocol: p2p.ProtocolVersion, Nonce: 0xBEEF, UserAgent: "/test/", Relay: true}
+	if _, err := conn.Handshake(ver, 0xBEEF, true); err != nil {
+		t.Fatal(err)
+	}
+
+	// The server's getdata handler takes its lock: holding it keeps that message in handling.
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		server.mu.Lock()
+		if len(server.conns) == 1 {
+			break // held from here on
+		}
+		server.mu.Unlock()
+		if time.Now().After(deadline) {
+			t.Fatal("the server did not take the connection")
+		}
+	}
+	locked := true
+	defer func() {
+		if locked {
+			server.mu.Unlock()
+		}
+	}()
+	payload, err := p2p.EncodeGetData(p2p.BlockItems([][32]byte{chain.RegtestGenesis().ID()}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Send(&p2p.Message{Command: p2p.CmdGetData, Payload: payload}); err != nil {
+		t.Fatal(err)
+	}
+	ping := []byte{1, 2, 3, 4, 5, 6, 7, 8}
+	if err := conn.Send(&p2p.Message{Command: p2p.CmdPing, Payload: ping}); err != nil {
+		t.Fatal(err)
+	}
+
+	got := make(chan error, 1)
+	go func() {
+		for {
+			msg, err := conn.Recv()
+			if err != nil {
+				got <- err
+				return
+			}
+			if msg.Command == p2p.CmdPong {
+				if string(msg.Payload) != string(ping) {
+					got <- fmt.Errorf("pong carries %x", msg.Payload)
+					return
+				}
+				got <- nil
+				return
+			}
+		}
+	}()
+	select {
+	case err := <-got:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no pong while the getdata waits")
+	}
+	server.mu.Unlock()
+	locked = false
+}

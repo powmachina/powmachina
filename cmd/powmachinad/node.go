@@ -564,24 +564,88 @@ func (n *Node) serve(conn *p2p.Conn, ticket *p2p.Ticket) {
 	n.readLoop(conn, peer, p2p.InboundPeerLimits())
 }
 
+// workQueueBytes is how much a peer's messages may wait for their turn. Past it the reading stops
+// until the queue drains, the way it did when every message was handled before the next was read.
+const workQueueBytes = 8 << 20
+
 // readLoop reads messages from a peer while the connection lives. A peer sending more than an
 // honest peer ever sends gets misbehaviour points and is disconnected.
+//
+// Pings and pongs are answered as they are read. Everything else is handled in order by a worker
+// of its own, because a batch of headers or blocks can take minutes to verify: RandomX without
+// its dataset costs tens of milliseconds a header, 2 000 headers are a message. While the reading
+// waited for that, neither side heard the other's ping for 90 s and both hung up, and a node on
+// its first download never got past the first batch.
 func (n *Node) readLoop(conn *p2p.Conn, peer *p2p.Peer, limits p2p.PeerLimits) {
 	meter := p2p.NewPeerMeter(limits, time.Now())
+	queue := make(chan *p2p.Message, 1024)
+	var (
+		mu      sync.Mutex
+		cond    = sync.NewCond(&mu)
+		pending int
+		stopped bool
+	)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for msg := range queue {
+			size := p2p.HeaderSize + len(msg.Payload)
+			mu.Lock()
+			skip := stopped
+			mu.Unlock()
+			var err error
+			if !skip {
+				err = n.handle(conn, peer, msg)
+			}
+			mu.Lock()
+			pending -= size
+			if err != nil && !stopped {
+				stopped = true
+				log.Printf("peer %v: %v", peer.Addr.IP, err)
+				conn.Close() // the reading ends on it
+			}
+			cond.Broadcast()
+			mu.Unlock()
+		}
+	}()
+	defer func() {
+		mu.Lock()
+		stopped = true
+		cond.Broadcast()
+		mu.Unlock()
+		close(queue)
+		<-done
+	}()
+
 	for {
 		msg, err := conn.Recv()
 		if err != nil {
 			return
 		}
-		if !meter.Allow(p2p.HeaderSize+len(msg.Payload), time.Now()) {
+		size := p2p.HeaderSize + len(msg.Payload)
+		if !meter.Allow(size, time.Now()) {
 			n.peers.Misbehaving(peer, p2p.MisbehaviorFlood)
 			n.reject(peer.Addr, "sending too many messages")
 			return
 		}
-		if err := n.handle(conn, peer, msg); err != nil {
-			log.Printf("peer %v: %v", peer.Addr.IP, err)
+		if msg.Command == p2p.CmdPing || msg.Command == p2p.CmdPong {
+			if err := n.handle(conn, peer, msg); err != nil {
+				log.Printf("peer %v: %v", peer.Addr.IP, err)
+				return
+			}
+			continue
+		}
+		mu.Lock()
+		for !stopped && pending > 0 && (pending+size > workQueueBytes || len(queue) == cap(queue)) {
+			cond.Wait()
+		}
+		if stopped {
+			mu.Unlock()
 			return
 		}
+		pending += size
+		mu.Unlock()
+		queue <- msg
 	}
 }
 

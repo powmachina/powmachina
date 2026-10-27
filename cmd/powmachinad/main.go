@@ -310,8 +310,9 @@ func runNode(params chain.NetParams, listenAddr, connectAddr, rpcAddr, stratumAd
 	node.ConnectAnchors(anchorsPath)
 
 	if connectAddr != "" {
+		// A sync that broke off is not the end of the node: it goes on with its other peers.
 		if err := node.SyncFrom(connectAddr); err != nil {
-			log.Fatalf("sync from %s failed: %v", connectAddr, err)
+			log.Printf("sync from %s failed: %v — carrying on with the other peers", connectAddr, err)
 		}
 	}
 
