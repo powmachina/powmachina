@@ -155,6 +155,8 @@ type Live struct {
 	Top         []LiveTop   `json:"top"`
 	Geo         LiveGeo     `json:"geo"`
 	Now         int64       `json:"now"`
+	// PotCogs is the Sharepool pot right now — the reward waiting to be paid out to shares.
+	PotCogs int64 `json:"pot_cogs"`
 }
 
 // LiveMiners is the answer of /api/sharepool/miners: every miner of the window, the most units
@@ -332,7 +334,8 @@ func (s *Server) buildLive(parent context.Context) ([]byte, error) {
 		c.paid = map[string]ShareTally{}
 	}
 	out := Live{Network: info.Network, Height: info.Height, TipTime: info.TipTime, TakesShares: pool.TakesShares,
-		Pool: liveTally(pool.ShareTally), Blocks: []LiveBlock{}, Top: []LiveTop{}, Geo: geo, Now: time.Now().Unix()}
+		Pool: liveTally(pool.ShareTally), Blocks: []LiveBlock{}, Top: []LiveTop{}, Geo: geo, Now: time.Now().Unix(),
+		PotCogs: credits.PotCogs}
 	if out.Geo.Countries == nil {
 		out.Geo.Countries = []LiveCountry{}
 	}
