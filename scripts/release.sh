@@ -21,10 +21,11 @@ set -euo pipefail
 # and not "whatever is under :1.27 today".
 BUILDER=golang@sha256:972b4110ba0f47539a975c31e52c64765e1ff19f2d74469ae4a595c6676e80a5
 BINARIES=(powmachinad powmachina-wallet-cli powmachina-wallet-rpc powmachina-miner)
-# -X main.version stamps the version into the miner, which is the one binary that prints it and sends
-# it to a pool as its user agent. Without it every released miner says "dev": the person reporting a
-# problem cannot tell us what they are running, and a pool's worker list shows "dev" for everybody.
-# The flag is harmless for the binaries that have no such variable — the linker ignores it.
+# -X main.version stamps the version into the miner, which prints it and sends it to a pool as its
+# user agent, and into the node, whose stratum server uses it to tell a miner on an older version
+# that an update is available. Without it both say "dev": the person reporting a problem cannot tell
+# us what they are running, a pool's worker list shows "dev" for everybody, and the update-notice is
+# off. The flag is harmless for the binaries that have no such variable — the linker ignores it.
 # Windows: the node, the wallet and the miner. The miner mines both lanes there once `powm-cuda.dll`
 # sits next to it; the DLL is not built here (nvcc drives MSVC on Windows) — it comes from the
 # cuda-windows workflow artifact, after it was verified on a card (BUILDING.md).

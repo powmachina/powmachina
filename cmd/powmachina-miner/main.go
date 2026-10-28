@@ -99,7 +99,11 @@ func main() {
 			login += "." + *worker
 		}
 		cl := &stratum.Client{URL: *pool, Login: login, Pass: "x", Agent: "powmachina-miner/" + version, Log: logger}
-		cl.Finality = openFinalityKey(*finKey, params.Name, chain.Genesis(params).ID(), logger)
+		gen := chain.Genesis(params)
+		if gen == nil {
+			die(logger, "%s has no genesis yet — this build cannot mine it", params.Name)
+		}
+		cl.Finality = openFinalityKey(*finKey, params.Name, gen.ID(), logger)
 		feed = cl
 		mode = "stratum " + *pool
 	} else {

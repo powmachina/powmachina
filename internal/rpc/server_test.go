@@ -253,6 +253,65 @@ func TestGetInfo(t *testing.T) {
 	}
 }
 
+// With -degrade-on-unknown-fork on and the network signalling (at a warning level) a fork this
+// binary does not implement, getinfo must stop reporting the chain as synced/trusted; off (the
+// default) it reports normally and only carries the advisory warning.
+func TestGetInfoDegradeOnUnknownFork(t *testing.T) {
+	// 80 of 100 recent blocks signal an unknown bit — a warning-severity ForkStatus.
+	forks := chain.ForkStatus{Window: 100, Forks: []chain.ForkState{{Fork: 9, Signalling: [2]int{40, 40}}}}
+
+	// Off by default: normal report, warning present but not acted on.
+	off := NewServer(&fakeBackend{height: 100, forks: forks}, "")
+	res, rerr := call(t, off, "", "getinfo", nil)
+	if rerr != nil {
+		t.Fatalf("getinfo failed: %v", rerr.Message)
+	}
+	if res["degraded"] != false {
+		t.Errorf("degraded should be false when the flag is off, got %v", res["degraded"])
+	}
+	if res["trusted_work"] != true || res["synced"] != true {
+		t.Errorf("flag off must not change trusted_work/synced: %v / %v", res["trusted_work"], res["synced"])
+	}
+	if ws, _ := res["warnings"].([]any); len(ws) != 1 {
+		t.Errorf("the warning should still be reported, got %v", res["warnings"])
+	}
+
+	// On: the node keeps serving but tells exchanges and wallets not to trust the chain.
+	on := NewServer(&fakeBackend{height: 100, forks: forks}, "")
+	on.SetDegradeOnUnknownFork(true)
+	res, rerr = call(t, on, "", "getinfo", nil)
+	if rerr != nil {
+		t.Fatalf("getinfo failed: %v", rerr.Message)
+	}
+	if res["degraded"] != true {
+		t.Errorf("degraded should be true, got %v", res["degraded"])
+	}
+	if res["trusted_work"] != false {
+		t.Errorf("trusted_work must be forced false when degraded, got %v", res["trusted_work"])
+	}
+	if res["synced"] != false {
+		t.Errorf("synced must be forced false when degraded, got %v", res["synced"])
+	}
+}
+
+// A notice-level unknown fork (below the warning threshold) must NOT degrade the node, even with
+// the flag on — only a warning-severity signal does.
+func TestGetInfoDegradeIgnoresNotice(t *testing.T) {
+	forks := chain.ForkStatus{Window: 100, Forks: []chain.ForkState{{Fork: 9, Signalling: [2]int{12, 8}}}} // 20% = notice
+	on := NewServer(&fakeBackend{height: 100, forks: forks}, "")
+	on.SetDegradeOnUnknownFork(true)
+	res, rerr := call(t, on, "", "getinfo", nil)
+	if rerr != nil {
+		t.Fatalf("getinfo failed: %v", rerr.Message)
+	}
+	if res["degraded"] != false {
+		t.Errorf("a notice must not degrade the node, got degraded=%v", res["degraded"])
+	}
+	if res["trusted_work"] != true {
+		t.Errorf("a notice must not touch trusted_work, got %v", res["trusted_work"])
+	}
+}
+
 // getforks gives the height of each rule and the signalling split by lane.
 func TestGetForks(t *testing.T) {
 	st := chain.ForkStatus{TipHeight: 300, Window: 300, Forks: []chain.ForkState{

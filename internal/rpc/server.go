@@ -205,11 +205,20 @@ type rpcError struct {
 type Server struct {
 	backend Backend
 	token   string
+	// degradeOnUnknownFork: when the operator turned it on, getinfo stops reporting the chain as
+	// synced/trusted while the network is signalling a consensus change this binary does not
+	// implement (a warning-severity ForkStatus warning). It is a reporting decision only — the
+	// node keeps running and enforcing the rules it has. Off by default; set by the operator.
+	degradeOnUnknownFork bool
 }
 
 func NewServer(backend Backend, token string) *Server {
 	return &Server{backend: backend, token: token}
 }
+
+// SetDegradeOnUnknownFork turns on the operator opt-in from -degrade-on-unknown-fork (off by
+// default). See the field for what it does.
+func (s *Server) SetDegradeOnUnknownFork(on bool) { s.degradeOnUnknownFork = on }
 
 // HTTPServer assembles the server with timeouts. `addr` should be localhost.
 func (s *Server) HTTPServer(addr string) *http.Server {
@@ -415,6 +424,31 @@ func (s *Server) getInfo() (any, error) {
 		lanes = append(lanes, l.String())
 	}
 
+	// warnings: consensus changes the network is signalling that this binary does not implement.
+	// Advisory — an exchange or a wallet can show it, the node keeps enforcing the rules it has
+	// (chain/upgrade.go). Always an array so a consumer need not special-case null.
+	warnings := s.backend.ForkStatus().Warnings()
+	if warnings == nil {
+		warnings = []chain.UpgradeWarning{}
+	}
+
+	// degraded: the operator turned on -degrade-on-unknown-fork and the network is signalling a
+	// consensus change this binary does not implement (a warning-severity one). The node keeps
+	// running, but it stops telling exchanges and wallets the chain is synced and trusted — its
+	// tip may no longer be the network's. The rules it enforces do not change (chain/upgrade.go).
+	degraded := false
+	if s.degradeOnUnknownFork {
+		for _, w := range warnings {
+			if w.Severity == "warning" {
+				degraded = true
+				break
+			}
+		}
+	}
+
+	trustedWork := s.backend.TrustedWork() && !degraded
+	synced := applied >= height && (bestKnown == 0 || height >= bestKnown) && !degraded
+
 	return map[string]any{
 		"node_name": s.backend.NodeName(),
 		"network":   s.backend.Params().Name,
@@ -424,8 +458,8 @@ func (s *Server) getInfo() (any, error) {
 		"chainwork": s.backend.ChainWork().String(),
 		// trusted_work = the chain has at least as much work as the network expects. When it is
 		// false, it may be cheap fake history handed to a new node — neither an exchange nor a
-		// wallet should work on such a chain.
-		"trusted_work":   s.backend.TrustedWork(),
+		// wallet should work on such a chain. It is also forced false in degraded mode (below).
+		"trusted_work":   trustedWork,
 		"utxo_count":     s.backend.UTXOCount(),
 		"mempool_txs":    mpCount,
 		"mempool_bytes":  mpBytes,
@@ -443,11 +477,15 @@ func (s *Server) getInfo() (any, error) {
 		"peers":          peers,
 		"best_known":     bestKnown,
 		"applied_height": applied,
-		"synced":         applied >= height && (bestKnown == 0 || height >= bestKnown),
+		"synced":         synced,
 		// settlement_check: "all" — the node verifies the PoW of every share the blocks settle;
 		// "sampled" — a light node, it checks a few at random and takes the rest on trust. An
 		// exchange, a pool and a miner want "all".
 		"settlement_check": settlementCheck(s.backend.ChecksEveryShare()),
+		"warnings":         warnings,
+		// degraded: true only with -degrade-on-unknown-fork on and a warning above. trusted_work
+		// and synced are forced false while it holds.
+		"degraded": degraded,
 	}, nil
 }
 

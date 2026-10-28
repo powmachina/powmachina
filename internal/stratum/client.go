@@ -180,6 +180,9 @@ func (c *Client) session(lanes []mh.Lane, set func(mh.Lane, *work.Job), quit <-c
 				var res LoginResult
 				_ = json.Unmarshal(resp.Result, &res)
 				c.logf("stratum: connected to %s (%s)", c.URL, fromServer(res.Network))
+				if res.Notice != "" {
+					c.logf("UPDATE: %s", fromServer(res.Notice))
+				}
 				loggedIn = true
 			}
 			continue

@@ -71,6 +71,9 @@ type LoginParams struct {
 type LoginResult struct {
 	ID      string `json:"id"`
 	Network string `json:"network"`
+	// Notice is an optional one-line courtesy message the miner prints — e.g. that a newer
+	// version is available. It is advisory only; nothing a reward or a block depends on is in it.
+	Notice string `json:"notice,omitempty"`
 }
 
 // JobParams is the `job` notification.

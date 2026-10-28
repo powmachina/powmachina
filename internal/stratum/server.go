@@ -48,7 +48,11 @@ type ServerOptions struct {
 	MaxConns    int           // 0 = 1024
 	MaxPerIP    int           // 0 = 64
 	ShareTarget time.Duration // the target interval of shares per connection and lane; 0 = 15 s
-	Log         *log.Logger
+	// MinerVersion is the version of the release this node is part of. When a miner logs in with
+	// an older version, the login reply carries a notice it prints. Empty or an unstamped "dev"
+	// build turns the notice off. It is advisory only (upgrade.go).
+	MinerVersion string
+	Log          *log.Logger
 }
 
 // Server is the node's stratum server.
@@ -327,7 +331,12 @@ func (c *sconn) serve() {
 				c.reply(*req.ID, nil, e)
 				return
 			}
-			c.reply(*req.ID, LoginResult{ID: c.sessionID(), Network: c.s.b.Params().Name}, nil)
+			c.mu.Lock()
+			agent := c.agent
+			c.mu.Unlock()
+			res := LoginResult{ID: c.sessionID(), Network: c.s.b.Params().Name}
+			res.Notice = upgradeNotice(c.s.opt.MinerVersion, agent)
+			c.reply(*req.ID, res, nil)
 			c.pushJobs()
 			c.askAttest()
 			deadline = 10 * time.Minute

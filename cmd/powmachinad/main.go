@@ -29,6 +29,11 @@ import (
 	"powmachina/internal/stratum"
 )
 
+// version is the release this node is part of (set by the build: -ldflags "-X main.version=…").
+// The stratum server tells a miner on an older version that an update is available; an unstamped
+// "dev" build turns that off.
+var version = "dev"
+
 func main() {
 	selfcheck := flag.Bool("selfcheck", false, "verify that the algorithm and RandomX work")
 	regtest := flag.Bool("regtest", false, "run on the regtest network")
@@ -41,6 +46,7 @@ func main() {
 	stratumPay := flag.String("stratum-address", "", "pay every stratum block here (a single-owner farm); otherwise to the address from the miner login")
 	mineAddr := flag.String("mineaddress", "", "address -mine pays to (without it a throwaway key, the reward is lost)")
 	noFinality := flag.Bool("no-finality", false, "do not trust the finality quorum — run the chain on plain PoW (the finality spec §5)")
+	degradeOnFork := flag.Bool("degrade-on-unknown-fork", false, "when the network signals a consensus change this node does not implement, stop reporting the chain as synced/trusted in getinfo (the node keeps running); off by default")
 	nodeName := flag.String("nodename", "", "node label peers will see you under (max 24 characters)")
 	txIndex := flag.Bool("txindex", false, "keep a transaction index (txid → block); the explorer and an exchange need it")
 	addrIndex := flag.Bool("addrindex", false, "keep an address index and balances; the explorer needs it")
@@ -108,7 +114,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "\n-mine is for regtest only; elsewhere use powmachina-miner")
 		os.Exit(2)
 	}
-	runNode(params, *listenAddr, *connectAddr, *rpcAddr, *stratumAddr, *stratumPay, *mineAddr, *anchors, *addnode, *datadir, *blockSrc, *serveBlocks, *metrics, *nodeName, *banList, dagMode, *serveBudget, *mine, *txIndex, *addrIndex, *allowPrivate, *geoipPath, *geoipIgnore)
+	runNode(params, *listenAddr, *connectAddr, *rpcAddr, *stratumAddr, *stratumPay, *mineAddr, *anchors, *addnode, *datadir, *blockSrc, *serveBlocks, *metrics, *nodeName, *banList, dagMode, *serveBudget, *mine, *txIndex, *addrIndex, *allowPrivate, *geoipPath, *geoipIgnore, *degradeOnFork)
 }
 
 // networkFlags picks the network. Mainnet cannot be picked until it has a genesis: better to
@@ -127,7 +133,7 @@ func networkFlags(testnet, regtest bool) (chain.NetParams, error) {
 
 func runNode(params chain.NetParams, listenAddr, connectAddr, rpcAddr, stratumAddr, stratumPay, mineAddr, anchorsPath, addnode, datadir,
 	blockSrc, serveBlocks, metricsAddr, nodeName, banList string, dag dagMode, serveBudgetMiB int64, mine int,
-	txIndex, addrIndex, allowPrivate bool, geoipPath, geoipIgnore string) {
+	txIndex, addrIndex, allowPrivate bool, geoipPath, geoipIgnore string, degradeOnFork bool) {
 	genesis := chain.Genesis(params)
 	if genesis == nil {
 		log.Fatalf("network %s has no genesis", params.Name)
@@ -254,7 +260,9 @@ func runNode(params chain.NetParams, listenAddr, connectAddr, rpcAddr, stratumAd
 		if err := checkRPCBind(rpcAddr, token); err != nil {
 			log.Fatalf("RPC: %v", err)
 		}
-		srv := rpc.NewServer(node, token).HTTPServer(rpcAddr)
+		rsrv := rpc.NewServer(node, token)
+		rsrv.SetDegradeOnUnknownFork(degradeOnFork)
+		srv := rsrv.HTTPServer(rpcAddr)
 		// We open the listener ourselves so the **real** address can be printed. With
 		// `127.0.0.1:0` (how the desktop wallet starts its node) the log would otherwise say
 		// `:0` and the caller would have no way to learn where to connect.
@@ -283,7 +291,7 @@ func runNode(params chain.NetParams, listenAddr, connectAddr, rpcAddr, stratumAd
 		if err != nil {
 			log.Fatalf("stratum: cannot listen on %s: %v", stratumAddr, err)
 		}
-		srv := stratum.NewServer(node, stratum.ServerOptions{Payout: payout})
+		srv := stratum.NewServer(node, stratum.ServerOptions{Payout: payout, MinerVersion: version})
 		node.SetStratum(srv)
 		go func() {
 			if err := srv.Serve(sln); err != nil {
@@ -308,6 +316,11 @@ func runNode(params chain.NetParams, listenAddr, connectAddr, rpcAddr, stratumAd
 	stop := make(chan struct{})
 	node.StartNetwork(stop)
 	node.ConnectAnchors(anchorsPath)
+
+	// Watch the fork signalling for a consensus change this binary does not implement, and say so
+	// loudly if the network is adopting one. It only reads what is already counted and never stops
+	// the node — a part of the hashrate must not be able to switch other nodes off (chain/upgrade.go).
+	go watchUpgradeWarnings(node, degradeOnFork, stop)
 
 	if connectAddr != "" {
 		// A sync that broke off is not the end of the node: it goes on with its other peers.
@@ -336,6 +349,48 @@ func runNode(params chain.NetParams, listenAddr, connectAddr, rpcAddr, stratumAd
 		close(stop)
 		if ln != nil {
 			ln.Close()
+		}
+	}
+}
+
+// watchUpgradeWarnings logs, at a transition, when the network starts (or stops) signalling a
+// consensus change this binary does not implement. It checks every few minutes and logs each
+// warning once — when it first appears and when it clears — so a long-running node is not quiet
+// about becoming outdated, without turning the log into a stream.
+func watchUpgradeWarnings(node *Node, degrade bool, stop <-chan struct{}) {
+	t := time.NewTicker(5 * time.Minute)
+	defer t.Stop()
+	active := map[string]bool{} // warning-severity codes already logged
+	check := func() {
+		now := map[string]bool{}
+		for _, w := range node.ForkStatus().Warnings() {
+			if w.Severity != "warning" {
+				continue
+			}
+			now[w.Code] = true
+			if !active[w.Code] {
+				log.Printf("UPGRADE WARNING: %s", w.Message)
+				if degrade {
+					log.Printf("-degrade-on-unknown-fork is set: getinfo now reports trusted_work=false and synced=false")
+				}
+			}
+		}
+		for code := range active {
+			if !now[code] {
+				log.Printf("upgrade warning cleared: %s", code)
+				if degrade && len(now) == 0 {
+					log.Printf("-degrade-on-unknown-fork: no more warnings, getinfo reports normally again")
+				}
+			}
+		}
+		active = now
+	}
+	for {
+		select {
+		case <-stop:
+			return
+		case <-t.C:
+			check()
 		}
 	}
 }
