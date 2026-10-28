@@ -93,6 +93,16 @@ func fakeNode(t *testing.T, overrides map[string]any) *httptest.Server {
 			"addresses": []any{map[string]any{"rank": 1, "address": "rpowm1qtest",
 				"balance_cogs": 950000000, "share_permille": 950}},
 		},
+		// getstratuminfo carries the miner's IP in `remote`; the Rigs page must not print it.
+		"getstratuminfo": map[string]any{
+			"count": 1,
+			"workers": []any{map[string]any{
+				"address": "rpowm1qtest", "worker": "rig1", "remote": "203.0.113.7:51234",
+				"agent": "powmachina-miner v0.2.4", "since": time.Now().Add(-90 * time.Minute).Unix(),
+				"lanes": []string{"C", "G"}, "accepted": 142, "rejected": 1, "blocks": 3,
+				"hashrate_c": 11000.0, "hashrate_g": 620000.0,
+			}},
+		},
 	}
 	for k, v := range overrides {
 		if v == nil {
@@ -164,6 +174,10 @@ func TestPagesRender(t *testing.T) {
 			[]string{"rpowm1qtest", "9.50000000 POWM", "received"},
 			[]string{"balance_cogs", "{rpowm1qtest"}},
 		{"/explorer/richlist", []string{"rpowm1qtest", "95.0%"}, nil},
+		// Rigs: the device and its estimate, with the full algorithm names — and never the miner's IP.
+		{"/explorer/rigs",
+			[]string{"Rigs", "rig1", "powmachina-miner v0.2.4", "MachinaHash-C", "MachinaHash-G", "11.0 kH/s"},
+			[]string{"203.0.113.7", "remote"}},
 	}
 	for _, c := range cases {
 		rec := get(t, h, c.path)

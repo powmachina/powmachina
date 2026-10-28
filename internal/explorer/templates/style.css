@@ -437,6 +437,7 @@ dl.props dt:last-of-type, dl.props dd:last-of-type { border-bottom: 0; }
   white-space: nowrap;
 }
 .lane-G { background: var(--ink); color: var(--paper); }
+.chips { display: flex; gap: 0.3rem; flex-wrap: wrap; }
 
 .lanes { display: grid; gap: 1.5rem; grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr)); }
 .lane-card { border: 1px solid var(--rule); padding: 1.25rem; }

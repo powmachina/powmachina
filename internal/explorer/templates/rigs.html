@@ -1,0 +1,50 @@
+{{define "rigs.html"}}{{template "top" .}}
+{{$d := .Data}}
+<p class="note lead">The devices mining on the chain's public stratum right now, as the nodes report
+them. Lane <b>MachinaHash-C</b> is RandomX on the processor, lane <b>MachinaHash-G</b> runs on the
+graphics card. The hashrate is each node's <b>estimate</b> from the shares a device sends, and the
+version is what the miner announces at login — both are for display only, and neither is anything a
+reward depends on. A device's network address is not shown.</p>
+<div class="scroll">
+<table>
+  <thead><tr>
+    <th>Miner</th>
+    <th>Worker</th>
+    <th>Lanes</th>
+    <th class="num">Lane C (est.)</th>
+    <th class="num">Lane G (est.)</th>
+    <th class="num">Accepted</th>
+    <th class="num">Rejected</th>
+    <th class="num">Blocks</th>
+    <th>Version</th>
+    <th class="num">Up</th>
+  </tr></thead>
+  <tbody>
+  {{range $d.Rigs}}
+    <tr>
+      <td>{{template "miner" .Address}}</td>
+      <td class="mono">{{if .Worker}}{{.Worker}}{{else}}<span class="dim">—</span>{{end}}{{if gt .Conns 1}} <span class="dim">×{{.Conns}}</span>{{end}}</td>
+      <td class="chips">{{range .Lanes}}{{template "lanetag" .}}{{end}}</td>
+      <td class="num">{{hashf .HashrateC}}</td>
+      <td class="num">{{hashf .HashrateG}}</td>
+      <td class="num">{{.Accepted}}</td>
+      <td class="num {{if eq .Rejected 0}}dim{{end}}">{{.Rejected}}</td>
+      <td class="num">{{.Blocks}}</td>
+      <td class="mono">{{if .Agent}}{{.Agent}}{{else}}<span class="dim">—</span>{{end}}</td>
+      <td class="num dim">{{since .Since}}</td>
+    </tr>
+  {{else}}
+    <tr><td colspan="10" class="dim">No devices are mining on the public stratum right now.</td></tr>
+  {{end}}
+  </tbody>
+</table>
+</div>
+{{if $d.Rigs}}
+<p class="meta">
+  <span>devices <b>{{len $d.Rigs}}</b></span>
+  <span>lane C <b>{{$d.LaneC}}</b> · {{hashf $d.TotalC}}</span>
+  <span>lane G <b>{{$d.LaneG}}</b> · {{hashf $d.TotalG}}</span>
+  <span>the hashrate is an estimate from shares; the version is self-reported</span>
+</p>
+{{end}}
+{{template "bottom" .}}{{end}}

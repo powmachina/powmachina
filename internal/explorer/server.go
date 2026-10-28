@@ -94,6 +94,7 @@ func (s *Server) funcs() template.FuncMap {
 		"cogs":      FormatCogs,
 		"cogsShort": FormatCogsShort,
 		"hashrate":  FormatHashrate,
+		"hashf":     formatHashrateFloat,
 		"algo":      AlgoName,
 		// addf/subf: the template draws an SVG chart and shifts coordinates by a few pixels
 		"addf":      func(a, b float64) float64 { return a + b },
@@ -131,6 +132,7 @@ func (s *Server) Handler() http.Handler {
 	})
 	mux.HandleFunc("GET "+b+"/richlist", s.handleRichList)
 	mux.HandleFunc("GET "+b+"/shares", s.handleShares)
+	mux.HandleFunc("GET "+b+"/rigs", s.handleRigs)
 	mux.HandleFunc("GET "+b+"/api/sharepool", s.handleLive)
 	mux.HandleFunc("GET "+b+"/api/sharepool/miners", s.handleLiveMiners)
 	mux.HandleFunc("GET "+b+"/search", s.handleSearch)
