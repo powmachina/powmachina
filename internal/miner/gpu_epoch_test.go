@@ -73,6 +73,7 @@ func (g *pickyGPU) Hash(h *[80]byte, n uint64) ([32]byte, error) {
 	return g.h.Hash(g.v, h, n, mh.LaneG)
 }
 func (g *pickyGPU) Config() (int, int, uint32) { return 1, 1, 4 }
+func (g *pickyGPU) Index() int                 { return 0 }
 
 // laneGMiner is a miner with one card and no feed: the test hands it the jobs itself.
 func laneGMiner(t *testing.T, g GPU, retry time.Duration) (*Miner, *syncBuf) {

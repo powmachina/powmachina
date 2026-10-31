@@ -82,7 +82,7 @@ func main() {
 			if i == 0 {
 				logger.Printf("benchmark CPU (lane C, %d threads): %s", *threads, human(rate))
 			} else {
-				logger.Printf("benchmark GPU %d %s (lane G): %s", i-1, names[i-1], human(rate))
+				logger.Printf("benchmark GPU %d %s (lane G): %s", gpus[i-1].Index(), names[i-1], human(rate))
 			}
 		}
 		return
@@ -142,7 +142,7 @@ func main() {
 		<-sig
 		close(quit)
 	}()
-	go report(m, logger, quit, *threads > 0, names)
+	go report(m, logger, quit, *threads > 0, gpus)
 	if err := m.Run(feed, quit); err != nil {
 		die(logger, "%v", err)
 	}
@@ -150,7 +150,7 @@ func main() {
 }
 
 // report prints the speed every 30 s, per device.
-func report(m *miner.Miner, logger *log.Logger, quit <-chan struct{}, cpu bool, gpuNames []string) {
+func report(m *miner.Miner, logger *log.Logger, quit <-chan struct{}, cpu bool, gpus []miner.GPU) {
 	last := make([]uint64, len(m.DeviceHashes))
 	lastT := time.Now()
 	t := time.NewTicker(30 * time.Second)
@@ -170,7 +170,7 @@ func report(m *miner.Miner, logger *log.Logger, quit <-chan struct{}, cpu bool, 
 				case i == 0 && cpu:
 					parts = append(parts, "CPU "+human(rate))
 				case i > 0:
-					parts = append(parts, fmt.Sprintf("GPU%d %s", i-1, human(rate)))
+					parts = append(parts, fmt.Sprintf("GPU%d %s", gpus[i-1].Index(), human(rate)))
 				}
 			}
 			lastT = now
@@ -224,7 +224,7 @@ func openGPUs(mode, devs, lib string, logger *log.Logger) ([]miner.GPU, []string
 			continue
 		}
 		logger.Printf("GPU %d: %s, %.0f GB, sm_%s, %d SM, memory %.0f GB/s",
-			len(out), d.Name, float64(d.Memory)/1e9, strings.ReplaceAll(d.SM, ".", ""), d.SMCount, d.PeakGBps)
+			d.Index, d.Name, float64(d.Memory)/1e9, strings.ReplaceAll(d.SM, ".", ""), d.SMCount, d.PeakGBps)
 		out = append(out, dev)
 		names = append(names, d.Name)
 	}

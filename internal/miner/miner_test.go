@@ -246,6 +246,10 @@ type fakeGPU struct {
 	hdr    [80]byte
 	target [32]byte
 	broken bool
+	index  int
+	// failSearch makes every Search return an error — a card hit by a sticky CUDA fault that no
+	// retry in the same process will clear.
+	failSearch bool
 }
 
 func (g *fakeGPU) SetEpoch(cache []uint32, items uint32, ops [16][3]uint8) error {
@@ -255,6 +259,9 @@ func (g *fakeGPU) SetEpoch(cache []uint32, items uint32, ops [16][3]uint8) error
 }
 func (g *fakeGPU) SetJob(h *[80]byte, t *[32]byte) error { g.hdr, g.target = *h, *t; return nil }
 func (g *fakeGPU) Search(start uint64) ([]uint64, uint64, error) {
+	if g.failSearch {
+		return nil, 0, errors.New("an illegal memory access was encountered")
+	}
 	var hits []uint64
 	for n := start; n < start+64; n++ {
 		out, _ := g.h.Hash(g.v, &g.hdr, n, mh.LaneG)
@@ -272,6 +279,7 @@ func (g *fakeGPU) Hash(h *[80]byte, n uint64) ([32]byte, error) {
 	return out, err
 }
 func (g *fakeGPU) Config() (int, int, uint32) { return 1, 1, 64 }
+func (g *fakeGPU) Index() int                 { return g.index }
 
 type laneGNode struct{ fakeNode }
 
@@ -289,7 +297,7 @@ func TestGPULaneMinesAndBrokenCardIsDisabled(t *testing.T) {
 		t.Skip("with -race the fake card is far too slow")
 	}
 	node := &laneGNode{fakeNode{tip: chain.RegtestGenesis().ID()}}
-	good, bad := &fakeGPU{}, &fakeGPU{broken: true}
+	good, bad := &fakeGPU{}, &fakeGPU{broken: true, index: 1}
 	var buf syncBuf
 	lg := log.New(&buf, "", 0)
 	m := New(Options{Params: chain.RegTest, Threads: -1, GPUs: []GPU{good, bad}, Log: lg})
@@ -322,6 +330,37 @@ func TestGPULaneMinesAndBrokenCardIsDisabled(t *testing.T) {
 	}
 	if m.DeviceHashes[2].Load() != 0 {
 		t.Fatal("the broken card was hashing")
+	}
+}
+
+// A card hit by a sticky CUDA fault fails every launch and cannot recover inside the process. The
+// miner must not spin there at 0 H/s forever (lane C mining on, no supervisor the wiser): after
+// gpuMaxConsecFail errors in a row it stops with an error so a supervisor can restart it clean.
+func TestGPUStuckCardStopsTheMiner(t *testing.T) {
+	old := gpuMaxConsecFail
+	gpuMaxConsecFail = 2 // keep the test short — the retry sleeps one second between failures
+	defer func() { gpuMaxConsecFail = old }()
+
+	node := &laneGNode{fakeNode{tip: chain.RegtestGenesis().ID()}}
+	g := &fakeGPU{failSearch: true}
+	var buf syncBuf
+	lg := log.New(&buf, "", 0)
+	m := New(Options{Params: chain.RegTest, Threads: -1, GPUs: []GPU{g}, Log: lg})
+	feed := &NodeFeed{Src: node, Payout: make([]byte, 32), Params: chain.RegTest, Poll: 20 * time.Millisecond, Log: lg}
+	quit := make(chan struct{})
+	done := make(chan error, 1)
+	go func() { done <- m.Run(feed, quit) }()
+
+	select {
+	case err := <-done:
+		close(quit)
+		if err == nil {
+			t.Fatalf("the miner did not stop on a stuck card:\n%s", buf.String())
+		}
+	case <-time.After(30 * time.Second):
+		close(quit)
+		<-done
+		t.Fatalf("the miner did not stop on a stuck card in time:\n%s", buf.String())
 	}
 }
 

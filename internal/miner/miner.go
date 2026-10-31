@@ -33,6 +33,9 @@ type GPU interface {
 	Search(start uint64) ([]uint64, uint64, error)
 	Hash(header *[80]byte, nonce uint64) ([32]byte, error)
 	Config() (threadsPerBlock, blocks int, perThread uint32)
+	// Index is the card's device ordinal (the nvidia-smi index), for the logs. It is not the
+	// position in the selection — with --gpu-devices 4 the one card is still device 4, not GPU 0.
+	Index() int
 }
 
 // Feed supplies the work and submits the nonces found.
@@ -126,14 +129,15 @@ type Miner struct {
 	found chan found
 	lanes map[mh.Lane]*lane
 
-	mu      sync.Mutex // preparing epochs (setJob is called by the feed)
-	rx      *mh.RandomX
-	rxEpoch uint64
-	stop    chan struct{}
-	wg      sync.WaitGroup
-	gpuStop chan struct{}
-	gpuWG   sync.WaitGroup
-	epochG  *epochData
+	mu       sync.Mutex // preparing epochs (setJob is called by the feed)
+	rx       *mh.RandomX
+	rxEpoch  uint64
+	stop     chan struct{}
+	wg       sync.WaitGroup
+	gpuStop  chan struct{}
+	gpuWG    sync.WaitGroup
+	gpuFatal chan error // a card that has given up; it stops the whole miner (nil = no cards)
+	epochG   *epochData
 
 	// Accepted/Rejected: nonces submitted (blocks when solo, shares with stratum). Blocks: blocks.
 	Accepted, Rejected, Blocks atomic.Uint64
@@ -351,6 +355,10 @@ func (m *Miner) Run(feed Feed, quit <-chan struct{}) error {
 			return nil
 		case err := <-feedErr:
 			return err
+		case err := <-m.gpuFatal:
+			// A card is stuck and cannot recover inside the process; stop so a supervisor restarts
+			// the miner with a clean GPU state. nil when there are no cards — that case never fires.
+			return err
 		case f := <-m.found:
 			l := m.lanes[f.t.job.Lane]
 			if l == nil || l.job.Load() != f.t {
@@ -559,6 +567,9 @@ func (m *Miner) work(start, stride uint64, h *mh.Hasher, cpu int) {
 
 func (m *Miner) startGPUs() {
 	m.gpuStop = make(chan struct{})
+	// Buffered by the number of cards: a card sends here at most once and then returns, so no
+	// send can block even if Run has already stopped reading.
+	m.gpuFatal = make(chan error, len(m.opt.GPUs))
 	for i, g := range m.opt.GPUs {
 		m.gpuWG.Add(1)
 		go m.gpuWork(i, g)
@@ -579,15 +590,39 @@ func (m *Miner) stopGPUs() {
 // fails the check again and stays idle.
 var gpuEpochRetry = time.Minute
 
+// gpuMaxConsecFail is how many CUDA errors in a row on one card (with no launch succeeding in
+// between) count as a stuck lane G. A single failed launch recovers and the count resets; a sticky
+// fault — an illegal address under WDDM, say — makes every later CUDA call fail, and that cannot be
+// cleared inside the process: the device would have to be reset process-wide, taking the other cards
+// with it. So past this many in a row the miner stops with a non-zero exit and lets a supervisor
+// restart it with a clean GPU state, instead of logging the same error every second at 0 H/s while
+// lane C mines on and nothing notices. A var so a test can lower it.
+var gpuMaxConsecFail = 30
+
+// gpuGaveUp records that a card has failed gpuMaxConsecFail times in a row and, at the threshold,
+// tells Run to stop the whole miner. It returns true when the caller should give up on the card.
+func (m *Miner) gpuGaveUp(dev, n int, err error) bool {
+	if n < gpuMaxConsecFail {
+		return false
+	}
+	select {
+	case m.gpuFatal <- fmt.Errorf("GPU %d: %d CUDA failures in a row (last: %v) — lane G is stuck and cannot recover in-process; exiting so a supervisor can restart the miner", dev, n, err):
+	default:
+	}
+	return true
+}
+
 // gpuWork serves one card: on a new epoch it builds the dataset and verifies the card against
 // internal/mh, on a new job it uploads the header and searches. The cards split the nonces by their top bits.
 func (m *Miner) gpuWork(idx int, g GPU) {
 	defer m.gpuWG.Done()
 	l := m.lanes[mh.LaneG]
+	dev := g.Index() // the device ordinal, for the logs; idx is the position in the selection
 	var epoch *epochData
 	var cur *task
 	var curTighten uint32
 	var nonce uint64
+	var consecFail int // CUDA errors in a row (reset by any successful launch)
 	// failed is the epoch the card could not be set up for, and failedAt when.
 	var failed *epochData
 	var failedAt time.Time
@@ -618,20 +653,24 @@ func (m *Miner) gpuWork(idx int, g GPU) {
 				// card off until the miner is restarted, with the CPU mining on as if all were well.
 				// Whatever the card has loaded now is not known to be right, so it starts over.
 				m.opt.Log.Printf("GPU %d: %v — the card does not mine epoch %d; it tries again with another epoch or in %v",
-					idx, err, t.epoch.epoch, gpuEpochRetry)
+					dev, err, t.epoch.epoch, gpuEpochRetry)
 				failed, failedAt, epoch, cur = t.epoch, time.Now(), nil, nil
 				continue
 			}
 			failed = nil
 			tpb, blocks, pt := g.Config()
 			m.opt.Log.Printf("GPU %d: epoch %d DAG built and verified against the reference in %v (grid %d×%d, %d per thread)",
-				idx, t.epoch.epoch, time.Since(start).Round(time.Millisecond), blocks, tpb, pt)
+				dev, t.epoch.epoch, time.Since(start).Round(time.Millisecond), blocks, tpb, pt)
 			epoch, cur = t.epoch, nil
 		}
 		if tighten := l.tighten.Load(); t != cur || tighten != curTighten {
 			hdr, target := t.job.PoW, t.target(tighten)
 			if err := g.SetJob(&hdr, &target); err != nil {
-				m.opt.Log.Printf("GPU %d: %v", idx, err)
+				consecFail++
+				m.opt.Log.Printf("GPU %d: %v", dev, err)
+				if m.gpuGaveUp(dev, consecFail, err) {
+					return
+				}
 				time.Sleep(time.Second)
 				continue
 			}
@@ -643,10 +682,15 @@ func (m *Miner) gpuWork(idx int, g GPU) {
 		started := time.Now()
 		nonces, hashes, err := g.Search(nonce)
 		if err != nil {
-			m.opt.Log.Printf("GPU %d: %v", idx, err)
+			consecFail++
+			m.opt.Log.Printf("GPU %d: %v", dev, err)
+			if m.gpuGaveUp(dev, consecFail, err) {
+				return
+			}
 			time.Sleep(time.Second)
 			continue
 		}
+		consecFail = 0
 		if pause := dutyPause(time.Since(started), m.opt.GPUDuty); pause > 0 {
 			select {
 			case <-m.gpuStop:

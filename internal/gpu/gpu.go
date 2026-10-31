@@ -132,8 +132,9 @@ func (p *Plugin) Devices() []DeviceInfo {
 // Device is one card with its own context. The methods are not safe for concurrent use — one goroutine
 // serves each card.
 type Device struct {
-	p   *Plugin
-	ctx unsafe.Pointer
+	p     *Plugin
+	ctx   unsafe.Pointer
+	index int
 }
 
 // Open opens a card.
@@ -143,7 +144,7 @@ func (p *Plugin) Open(index int) (*Device, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("GPU %d: %s", index, C.GoString(&eb[0]))
 	}
-	return &Device{p: p, ctx: ctx}, nil
+	return &Device{p: p, ctx: ctx, index: index}, nil
 }
 
 // Close releases a card.
@@ -153,6 +154,10 @@ func (d *Device) Close() {
 		d.ctx = nil
 	}
 }
+
+// Index is the plugin's device ordinal — the one nvidia-smi shows — not the position in the
+// miner's selection.
+func (d *Device) Index() int { return d.index }
 
 // SetEpoch builds the epoch dataset on the card from the cache and tunes the grid.
 func (d *Device) SetEpoch(cache []uint32, datasetItems uint32, ops [16][3]uint8) error {
