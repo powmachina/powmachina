@@ -17,16 +17,43 @@ on:
       - ".github/workflows/cuda-windows.yml"
   workflow_dispatch:
   # release.yml calls this instead of copying the steps: the -gencode list has to stay identical
-  # between a plain build and a release, and two copies of it would drift.
+  # between a plain build and a release, and two copies of it would drift. The inputs let the same
+  # steps build a second plugin for an older toolkit (Pascal, sm_61, which CUDA 13 dropped) without a
+  # copy of the job; they default to the main CUDA 13 / sm_75..120 build, so push and the plain call
+  # are unchanged.
   workflow_call:
+    inputs:
+      cuda_version:
+        type: string
+        default: "13.4.3"
+      cuda_sha256:
+        type: string
+        default: "35296d52a972c931a70cf8084120e3a0f0479de13f12527fcebfe8fbcaf5399c"
+      installer_url:
+        type: string
+        default: "https://developer.download.nvidia.com/compute/cuda/13.4.3/local_installers/cuda_13.4.3_windows_x86_64.exe"
+      gencode:
+        type: string
+        default: "-gencode arch=compute_75,code=sm_75 -gencode arch=compute_80,code=sm_80 -gencode arch=compute_86,code=sm_86 -gencode arch=compute_89,code=sm_89 -gencode arch=compute_90,code=sm_90 -gencode arch=compute_120,code=sm_120 -gencode arch=compute_120,code=compute_120"
+      output:
+        type: string
+        default: "powm-cuda.dll"
+      artifact:
+        type: string
+        default: "powm-cuda-windows-x64"
 
 permissions:
   contents: read
 
 env:
-  # The same toolkit the DLL was verified with on a card. Changing it changes what comes out.
-  CUDA_VERSION: "13.4.3"
-  CUDA_SHA256: 35296d52a972c931a70cf8084120e3a0f0479de13f12527fcebfe8fbcaf5399c
+  # The same toolkit the DLL was verified with on a card. Changing it changes what comes out. The
+  # `||` defaults make push and workflow_dispatch (no inputs) build exactly the main CUDA 13 plugin.
+  CUDA_VERSION: ${{ inputs.cuda_version || '13.4.3' }}
+  CUDA_SHA256: ${{ inputs.cuda_sha256 || '35296d52a972c931a70cf8084120e3a0f0479de13f12527fcebfe8fbcaf5399c' }}
+  CUDA_URL: ${{ inputs.installer_url || 'https://developer.download.nvidia.com/compute/cuda/13.4.3/local_installers/cuda_13.4.3_windows_x86_64.exe' }}
+  GENCODE: ${{ inputs.gencode || '-gencode arch=compute_75,code=sm_75 -gencode arch=compute_80,code=sm_80 -gencode arch=compute_86,code=sm_86 -gencode arch=compute_89,code=sm_89 -gencode arch=compute_90,code=sm_90 -gencode arch=compute_120,code=sm_120 -gencode arch=compute_120,code=compute_120' }}
+  OUT_DLL: ${{ inputs.output || 'powm-cuda.dll' }}
+  ART_NAME: ${{ inputs.artifact || 'powm-cuda-windows-x64' }}
 
 jobs:
   build:
@@ -39,8 +66,7 @@ jobs:
         shell: pwsh
         run: |
           $exe = "$env:RUNNER_TEMP\cuda.exe"
-          $url = "https://developer.download.nvidia.com/compute/cuda/$env:CUDA_VERSION/local_installers/cuda_${env:CUDA_VERSION}_windows_x86_64.exe"
-          curl.exe -fsSL --retry 3 -o $exe $url
+          curl.exe -fsSL --retry 3 -o $exe $env:CUDA_URL
           $got = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
           if ($got -ne $env:CUDA_SHA256) { throw "the CUDA installer has hash $got, expected $env:CUDA_SHA256" }
           $p = Start-Process $exe -ArgumentList '-s' -Wait -PassThru
@@ -48,23 +74,20 @@ jobs:
           $bin = Get-ChildItem "$env:ProgramFiles\NVIDIA GPU Computing Toolkit\CUDA\v*\bin" | Select-Object -First 1
           "$($bin.FullName)" >> $env:GITHUB_PATH
 
-      # The architecture list is the one the .so is built with and it has to stay the same:
-      # a release has to run on the same range of cards on both systems.
-      - name: Build powm-cuda.dll
+      # The default architecture list is the one the .so is built with and it has to stay the same:
+      # a release has to run on the same range of cards on both systems. The Pascal build overrides
+      # it (sm_61, which CUDA 13 dropped).
+      - name: Build %OUT_DLL%
         shell: cmd
         working-directory: machinahash-cuda
         run: |
           for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do call "%%i\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
           if not exist bin mkdir bin
           nvcc --version || exit /b 1
-          nvcc -O3 -std=c++17 ^
-            -gencode arch=compute_75,code=sm_75 -gencode arch=compute_80,code=sm_80 ^
-            -gencode arch=compute_86,code=sm_86 -gencode arch=compute_89,code=sm_89 ^
-            -gencode arch=compute_90,code=sm_90 -gencode arch=compute_120,code=sm_120 ^
-            -gencode arch=compute_120,code=compute_120 ^
-            -shared -cudart static -o bin\powm-cuda.dll plugin\powm_cuda.cu || exit /b 1
-          dumpbin /nologo /exports bin\powm-cuda.dll > bin\exports.txt || exit /b 1
-          dumpbin /nologo /dependents bin\powm-cuda.dll
+          nvcc -O3 -std=c++17 %GENCODE% ^
+            -shared -cudart static -o bin\%OUT_DLL% plugin\powm_cuda.cu || exit /b 1
+          dumpbin /nologo /exports bin\%OUT_DLL% > bin\exports.txt || exit /b 1
+          dumpbin /nologo /dependents bin\%OUT_DLL%
 
       # Without the export macro the DLL builds, loads, and then every GetProcAddress returns null.
       - name: All ten symbols are exported
@@ -78,7 +101,7 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: powm-cuda-windows-x64
-          path: machinahash-cuda/bin/powm-cuda.dll
+          name: ${{ env.ART_NAME }}
+          path: machinahash-cuda/bin/${{ env.OUT_DLL }}
           if-no-files-found: error
           retention-days: 30

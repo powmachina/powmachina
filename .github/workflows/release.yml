@@ -68,8 +68,53 @@ jobs:
           path: machinahash-cuda/bin/libpowm-cuda.so
           if-no-files-found: error
 
+  # The GPU plugin for Pascal (sm_61 — GTX 10xx, P104/P106). CUDA 13 dropped Pascal, so it needs an
+  # older toolkit and ships as a separate, opt-in asset rather than inside the archive: a miner on a
+  # Pascal card downloads it and points --cuda-lib at it. Build only, verified on a card by hand.
+  # sm_60 too so a P100 is covered, and the PTX so a Pascal variant with no cubin still JITs.
+  linux-plugin-pascal:
+    runs-on: ubuntu-latest
+    container: nvidia/cuda:12.6.3-devel-ubuntu24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build libpowm-cuda-pascal.so
+        working-directory: machinahash-cuda
+        run: |
+          set -eux
+          mkdir -p bin
+          nvcc -O3 -std=c++17 \
+            -gencode arch=compute_60,code=sm_60 -gencode arch=compute_61,code=sm_61 \
+            -gencode arch=compute_61,code=compute_61 \
+            -shared -Xcompiler -fPIC -cudart static -o bin/libpowm-cuda-pascal.so plugin/powm_cuda.cu
+          for s in pmc_abi pmc_device_count pmc_device_info pmc_create pmc_destroy \
+                   pmc_set_epoch pmc_set_job pmc_search pmc_hash pmc_config; do
+            nm -D --defined-only bin/libpowm-cuda-pascal.so | grep -qw "$s" || { echo "$s is not exported"; exit 1; }
+          done
+      - uses: actions/upload-artifact@v7
+        with:
+          name: powm-cuda-pascal-linux-x64
+          path: machinahash-cuda/bin/libpowm-cuda-pascal.so
+          if-no-files-found: error
+
   windows-plugin:
     uses: ./.github/workflows/cuda-windows.yml
+
+  # The same for Windows (powm-cuda-pascal.dll), through the parameterized cuda-windows.yml. It needs
+  # a CUDA 12.x installer, and NVIDIA posts only an MD5 for it, so the URL and the SHA256 are not
+  # pinned here from a guess — they are repository variables set once (CUDA12_WIN_URL,
+  # CUDA12_WIN_SHA256, optionally CUDA12_VERSION). Until they are set the job is skipped, so a release
+  # still ships the Linux Pascal plugin and the main plugins; set them and the next release carries
+  # the Windows Pascal DLL too.
+  windows-plugin-pascal:
+    if: ${{ vars.CUDA12_WIN_URL != '' && vars.CUDA12_WIN_SHA256 != '' }}
+    uses: ./.github/workflows/cuda-windows.yml
+    with:
+      cuda_version: ${{ vars.CUDA12_VERSION || '12.6.3' }}
+      cuda_sha256: ${{ vars.CUDA12_WIN_SHA256 }}
+      installer_url: ${{ vars.CUDA12_WIN_URL }}
+      gencode: "-gencode arch=compute_60,code=sm_60 -gencode arch=compute_61,code=sm_61 -gencode arch=compute_61,code=compute_61"
+      output: "powm-cuda-pascal.dll"
+      artifact: "powm-cuda-pascal-windows-x64"
 
   gui:
     needs: version
@@ -123,7 +168,11 @@ jobs:
 
   publish:
     runs-on: ubuntu-latest
-    needs: [version, binaries, gui]
+    # The Pascal plugins are in `needs` only so publish waits for their artifacts. windows-plugin-pascal
+    # is skipped until its repository variables are set, so `!cancelled()` plus the explicit success
+    # checks let publish run without it instead of being skipped along with it.
+    needs: [version, binaries, gui, linux-plugin-pascal, windows-plugin-pascal]
+    if: ${{ !cancelled() && needs.version.result == 'success' && needs.binaries.result == 'success' && needs.gui.result == 'success' && needs.linux-plugin-pascal.result == 'success' }}
     permissions:
       contents: write
     steps:
@@ -165,6 +214,13 @@ jobs:
             find artifacts -path 'artifacts/wallet-*' -type f \
               \( -name '*setup.exe' -o -name '*.deb' -o -name '*.AppImage' -o -name '*.rpm' \) -print0)
 
+          # The opt-in Pascal plugins (sm_61), if they were built — standalone assets, not in the
+          # archives. The Windows one is there only when windows-plugin-pascal ran.
+          for f in artifacts/powm-cuda-pascal-linux-x64/libpowm-cuda-pascal.so \
+                   artifacts/powm-cuda-pascal-windows-x64/powm-cuda-pascal.dll; do
+            [ -f "$f" ] && take "$f"
+          done
+
           # `! -name SHA256SUMS` is not belt-and-braces: the redirection creates the file before
           # `find` walks the directory, so without it the list contains itself, with a hash it
           # cannot possibly have — and verifying the list then fails for everyone.
@@ -196,6 +252,11 @@ jobs:
           minisign -Vm SHA256SUMS -P <public key>
           sha256sum --ignore-missing -c SHA256SUMS
           \`\`\`
+
+          **Pascal GPUs (GTX 10xx, P104/P106 — sm_61).** CUDA 13 dropped Pascal, so the bundled plugin
+          has no kernel for these cards. A separate plugin ships for them — \`libpowm-cuda-pascal.so\`
+          (and \`powm-cuda-pascal.dll\` on Windows): download it, put it beside the miner and run with
+          \`--cuda-lib <path-to-the-pascal-plugin>\`.
 
           Testnet coins have no value.
           EOF
